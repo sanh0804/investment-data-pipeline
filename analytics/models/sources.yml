@@ -1,0 +1,18 @@
+version: 2
+sources:
+  - name: synthetic_input
+    database: "{{ target.database }}"
+    schema: "{{ var('customer_source_schema') }}"
+    description: Synthetic customers and matched trades; fixture tests override schema only in a separate database.
+    tables:
+      - name: customers
+        description: Existing synthetic customer entities, keyed by customer_id with dataset membership.
+      - name: trades
+        description: Existing matched synthetic executions; monetary values already rounded per trade.
+  - name: market_input
+    database: "{{ target.database }}"
+    schema: "{{ var('price_source_schema') }}"
+    description: Coinbase daily closes in demo; explicitly fake price references in fixture test DB.
+    tables:
+      - name: daily_prices
+        description: One source/product/UTC day; distinct from execution/reference prices stored on trades.

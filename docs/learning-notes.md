@@ -82,3 +82,40 @@ Fixture CSV + expected_totals.json chỉ được unit tests đọc, chưa phả
 
 Không cộng quantity của BTC/ETH/SOL thành một tổng vì khác đơn vị. Notional USD và
 fee USD có thể cộng; đó là tổng hoạt động giao dịch, không phải vốn, balance hay P&L.
+
+## Chặng 2B — dbt analytics
+
+Flow: existing synthetic/market sources → stg_customers/stg_trades/stg_asset_prices
+→ dim_assets/dim_date + fact_trades → mart_daily_trading/mart_customer_summary.
+Đọc analytics/models/schema.yml và docs/models.md để hiểu grain/columns trước,
+sau đó xem fact joins, marts và analytics/tests. scripts/run_dbt.py là env wrapper;
+scripts/verify_dbt.py chạy migrations/fixture models trên test server riêng.
+
+### Ba kiến thức cần hiểu
+
+1. **Grain và join cardinality.** Customer key có dataset; asset/price key có source,
+   product và price còn có ngày. Join thiếu một thành phần có thể nhân đôi tiền mà
+   SQL vẫn chạy thành công. LEFT JOIN giữ trade, tests bắt dimension thiếu; unique
+   và reconciliation phát hiện fan-out, không dùng DISTINCT fact để che lỗi.
+2. **Additive và non-additive metrics.** Volume/phí/count có thể SUM theo nhóm không
+   chồng lấn; distinct customers không được cộng từ asset/side hoặc từ nhiều ngày.
+   Fee phải SUM số đã round per trade. Customer zero-trade giữ totals zero nhưng
+   recency NULL để phân biệt chưa giao dịch với vừa giao dịch hôm nay.
+3. **As-of analytics và kiểm thử trên model thật.** Cutoff UTC cố định ngăn future
+   trades/customer leakage, segment dựa dữ liệu tới cutoff. Fixture nhỏ với oracle
+   tính tay phải chạy chính SQL models; thử dbt trên dữ liệu thật/synthetic và chạy
+   Python tính fixture riêng không thay thế được việc đó. Migrations test trên DB
+   mới, không reset DB đang dùng.
+
+### Ba câu hỏi phỏng vấn
+
+1. Tại sao count/volume tăng sau join dim_assets hoặc daily prices dù trade_id không đổi?
+   Kiểm tra grain từng bảng, đủ source/product/date chưa, uniqueness và per-key
+   cardinality; đối chiếu count/tiền trước-sau, không chữa bằng DISTINCT toàn fact.
+2. Một khách BUY BTC và SELL ETH cùng ngày được tính active customers thế nào?
+   Một khách tại daily grain; COUNT DISTINCT từ executions của toàn ngày. Toàn kỳ
+   cũng DISTINCT trực tiếp từ fact, không SUM daily active customers.
+3. Làm sao báo cáo customer tái lập và vẫn giữ khách chưa từng giao dịch?
+   Chốt dataset/as_of_date UTC, lọc cả customer creation và trades, LEFT JOIN một
+   aggregate theo dataset/customer; totals zero, dates/recency NULL. Chứng minh bằng
+   fixture qua cùng dbt models với cutoffs sớm/muộn và expected totals độc lập.

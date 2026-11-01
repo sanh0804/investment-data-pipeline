@@ -1,7 +1,9 @@
 # Fixture riêng cho reconciliation ở chặng 2B
 
 Dữ liệu này hoàn toàn giả, không phải giao dịch/giá live. Chỉ đọc từ test, không
-có loader vào PostgreSQL. `source=fixture` cố ý không thỏa constraint source của
+có loader vào PostgreSQL demo. Chặng 2B dùng `scripts/verify_dbt.py` nạp vào schema
+`fixture_input` trên server/database test riêng để chạy chính SQL dbt models.
+`source=fixture` cố ý không thỏa constraint source của
 bảng market/synthetic production. Không thay thế hoặc điền thiếu dữ liệu API.
 
 4 customers, 6 matched trades, 6 price references trong 3 ngày. Customer có đuôi
@@ -30,4 +32,6 @@ tình cờ bằng nhau ở bộ này; quy tắc vẫn là round per trade rồi 
 `expected_totals.json` viết độc lập các tổng theo customer, product, side, date;
 test đọc CSV, kiểm tra arithmetic/keys/timestamps và so sánh với các số này.
 Đơn vị quantity là base asset; không cộng quantity BTC/ETH/SOL thành một tổng.
-Chưa dựng dbt/reconciliation models: đây chỉ là hợp đồng dữ liệu đầu vào/expected.
+Chặng 2B chạy dbt models trên bộ này và đối chiếu chính expected JSON; chưa có
+scheduler/CI. Test DB có thêm distractor dataset/source và future rows, nhưng các
+row ngoài scope/cutoff phải bị loại; expected baseline vẫn là bộ 4 customers/6 trades.

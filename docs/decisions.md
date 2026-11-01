@@ -1,7 +1,7 @@
 # Quyết định theo chặng
 
-Phần chặng 1 bên dưới là lịch sử; quyết định chặng 2A ở cuối tài liệu thay thế
-các giới hạn cũ về BTC-only, window đơn và tên volume.
+Các phần theo chặng giữ lịch sử quyết định. Chặng 2A thay giới hạn BTC-only,
+window đơn và tên volume; chặng 2B thêm analytics dbt, không thay source contracts.
 
 ## 2026-11-01 — Phạm vi
 
@@ -142,3 +142,74 @@ giá giả rõ ràng, expected totals viết độc lập. Không có command n�
 source CHECK cũng ngăn ghi fixture trực tiếp. Mẫu gồm zero-trade customer, cả BUY/SELL,
 fee half-cent và notional half-cent để chặng 2B có oracle kiểm thử.
 Chưa thêm dbt, Airflow, Metabase, CI, analytics models, balances, holdings hoặc P&L.
+
+## 2026-11-01 — Chặng 2B: dbt analytics
+
+Đã review diff, staged files, artifacts và đối chiếu password local với candidate
+contents trước khi commit 2A thành `933071b`. Không push remote. Không sửa migrations
+001/002 đã áp dụng và không xóa volume/data. Schema nguồn được đọc trực tiếp từ
+information_schema trước khi quyết định joins.
+
+### Runtime và credentials
+
+Chọn dbt Core/dbt-postgres 1.11.0, pin trực tiếp ở requirements-dbt.txt. Package
+metadata yêu cầu Python >=3.10, adapter công bố classifier Python 3.13; đã cài wheel
+psycopg2-binary 2.9.13 cho Python 3.13.5 macOS arm64 và build thực tế thành công.
+Nguồn tham khảo: [dbt-postgres 1.11.0](https://pypi.org/project/dbt-postgres/1.11.0/),
+[Postgres setup](https://docs.getdbt.com/docs/local/connect-data-platform/postgres-setup),
+[env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var).
+
+Dùng .venv-dbt tách collector .venv. Profile chỉ đọc env; wrapper dùng dotenv từ
+collector env rồi truyền password qua DBT_ENV_SECRET_PASSWORD để dbt redact secrets.
+Không có password trong YAML hoặc command arguments. Chưa khóa transitive dependencies;
+version thực tế đã ghi trong verification. Không thêm dbt packages ngoài.
+
+### Scope, models và metrics
+
+Cấu hình cố định dataset_id=portfolio-v1, as_of_date=2026-10-27, price_source=coinbase_exchange.
+Cutoff là trước nửa đêm UTC của ngày kế tiếp, không dùng CURRENT_DATE. Source schemas
+synthetic/market, output analytics; macro luôn dùng target schema analytics/analytics_*,
+kể cả dbt internal audit-schema request. Không để custom schema config redirect source.
+Guard compile với DBT_SCHEMA=market đã được thử và bị từ chối.
+
+Staging là views; dimensions/fact/marts là tables. Không incremental/SCD2/snapshot history.
+Một schema biểu diễn một dataset/cutoff build; dùng schema khác để giữ cutoff khác.
+Staging views phản ánh source hiện tại, cần build lại tables khi source đổi để các tầng
+nhất quán. Chưa có scheduler tự refresh hoặc DB role riêng chỉ có SELECT trên source.
+
+8 models, grain/columns/lineage mô tả ở docs/models.md và models/schema.yml.
+Fact giữ một dataset/trade, LEFT JOIN customer theo dataset+customer, asset theo
+source+product, price theo source+product+day, date theo UTC trade_date. Không DISTINCT
+fact để che join fan-out. Surrogate MD5 từ JSONB arrays phục vụ tests/analytics;
+SQL joins vẫn dùng full natural keys. Price context không ghi đè snapshot reference_close
+hay execution_price. Không copy synthetic.activity_profile vào staging/customer segment.
+
+Trade volume là SUM(notional_usd), không gọi revenue. Fees là SUM fee_usd đã round
+per trade, không áp fee rate lên aggregate. Daily mart có một dataset/ngày có trade,
+không thêm asset/side subtotals; active customers DISTINCT trực tiếp ở grain ngày,
+không cộng distinct của slices hoặc ngày. Không fill zero-trade days trong mart này.
+
+Customer summary LEFT JOIN aggregate theo dataset/customer, giữ mọi customer đủ
+điều kiện created_at tại cutoff. Zero-trade có totals=0 và dates/recency=NULL.
+Demo behavior rules: active <=30 ngày, at_risk 31..59, inactive >=60, never_traded
+nếu chưa có trade tới cutoff. Không RFM/churn inference; lifetime chỉ trong dataset.
+
+### Isolated verification
+
+compose.test.yaml tạo server PostgreSQL riêng trên 55433, tmpfs, không mount volume
+hiện tại. Script tạo verify_2b_<UUID> mới mỗi lần, chạy migrations hai lần, rồi load
+fixture vào fixture_input (LIKE source types/defaults, không copy production constraints).
+Market/synthetic chuẩn của test DB vẫn rỗng. Không drop DB hoặc xóa data sau test;
+server/DB test được giữ để review và tmpfs không dùng làm persistence.
+
+Fixture là 4 customers/6 trades của 2A, expected_totals.json giữ nguyên. Chạy chính
+models bằng source-schema variables trên test DB, không có SQL models riêng cho test.
+Thêm adversarial rows của dataset khác dùng cùng UUID, provider khác cùng pair/day
+và future customer/trade. Baseline phải vẫn khớp JSON theo global/customer/product/side/date.
+Bốn cutoffs kiểm tra dates/recency/segments và chống future-data leakage; daily distinct
+[1,1,2] kiểm tra trường hợp một khách giao dịch nhiều assets trong ngày.
+
+88 data tests cùng Python assertions trên output dbt bổ sung cho nhau; không dùng
+Python fixture-only tests thay dbt. Artifacts mỗi test case ở target path riêng để
+không đè manifest/run_results của demo. So checksum các demo source tables trước/sau.
+Chưa thêm Airflow, Metabase, AI, CI, SCD2, retention, RFM, balances, holdings hoặc P&L.

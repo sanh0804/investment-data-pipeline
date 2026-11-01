@@ -3,9 +3,9 @@
 Personal portfolio project for Data Engineering / Data Analytics roles, on macOS.
 
 ## Scope and working rules
-- Current authorized scope: stage 2A — Coinbase BTC/ETH/SOL daily prices for 180 completed UTC days, deterministic synthetic customers/matched trades, and a small isolated reconciliation fixture. Stop after verification for user review.
+- Current authorized scope: stage 2B — dbt-postgres analytics over existing data, tests, reconciliation and fixture execution through the same models in a separate test database. Stop after verification for user review.
 - Planned stack: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose, GitHub Actions. Later scope includes BTC/ETH/SOL, 1,000 simulated customers and 50,000 matched trades, SQL transformations, quality checks, reconciliation, customer summary and one dashboard. Airflow and CI come last.
-- Do not implement dbt, Airflow, Metabase, AI agents, SCD2, retention, balances, holdings or P&L in stage 2A.
+- Do not implement Airflow, Metabase, AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L in stage 2B.
 - Inspect machine architecture and installed tools; never assume Intel or Apple Silicon.
 - Keep the repository small and understandable. Prefer explicit SQL and ordinary Python functions over extra frameworks.
 - Verify provider documentation and a real response before choosing timestamp/day semantics. Distinguish an exchange price from a market-wide price.
@@ -29,5 +29,10 @@ Personal portfolio project for Data Engineering / Data Analytics roles, on macOS
 - Exact-response integration check: `.venv/bin/python -m pipeline.verify_idempotency --fetch-id <UUID>`
 - Synthetic load: `.venv/bin/python -m pipeline.synthetic --dataset-id portfolio-v1 --seed 20261101 --start 2026-05-01 --end 2026-10-28`
 - Stage 2A verification: `.venv/bin/python -m pipeline.verify_stage2a --dataset-id portfolio-v1`
+- dbt environment: `python3 -m venv .venv-dbt`; `.venv-dbt/bin/python -m pip install -r requirements-dbt.txt`
+- dbt build: `.venv/bin/python scripts/run_dbt.py build --vars '{"dataset_id":"portfolio-v1","as_of_date":"2026-10-27"}'`
+- dbt fixture/migration integration: `.venv/bin/python scripts/verify_dbt.py`
+
+For dbt: preserve source schemas; write only analytics schemas. Use explicit UTC as_of_date, never CURRENT_DATE for demo reports. Join on complete dataset/source keys; active customers are distinct at the report grain, never summed across asset/side groups. Fixtures run through the same models in a new test DB, never live input tables.
 
 Do not broaden scope or add tools just because they appear in the future stack.

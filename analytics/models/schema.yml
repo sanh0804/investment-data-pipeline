@@ -1,0 +1,279 @@
+version: 2
+models:
+  - name: stg_customers
+    description: One customer per dataset/customer at the UTC reporting cutoff; synthetic profile deliberately excluded.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [dataset_id, customer_id]}
+    columns:
+      - name: dataset_id
+        description: Explicit selected synthetic dataset.
+        data_tests: [not_null]
+      - name: customer_id
+        description: Stable source customer UUID.
+        data_tests: [not_null]
+      - name: customer_key
+        description: MD5 of JSON array [dataset_id, customer_id]; joins still use natural composite keys.
+        data_tests: [unique, not_null]
+      - name: created_at
+        description: Customer creation instant; must precede cutoff end in UTC.
+        data_tests: [not_null]
+      - name: created_date
+        description: UTC date of creation.
+        data_tests: [not_null]
+      - name: customer_number
+        description: Source ordinal within dataset, not a cross-dataset key.
+  - name: stg_trades
+    description: One matched synthetic execution per dataset/trade up to and including as_of_date UTC; retain original rounded money.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [dataset_id, trade_id]}
+    columns:
+      - name: dataset_id
+        description: Explicit selected dataset.
+        data_tests: [not_null]
+      - name: trade_id
+        description: Stable source execution UUID.
+        data_tests: [not_null]
+      - name: trade_key
+        description: Dataset-scoped execution surrogate key.
+        data_tests: [unique, not_null]
+      - name: customer_key
+        description: Dataset-scoped customer key.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('stg_customers')", field: customer_key}
+      - name: customer_id
+        description: Natural customer UUID; join with dataset_id.
+        data_tests: [not_null]
+      - name: asset_key
+        description: Provider/product surrogate key.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_assets')", field: asset_key}
+      - name: price_key
+        description: Provider/product/price_date surrogate key.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('stg_asset_prices')", field: price_key}
+      - name: source
+        description: Price provider for synthetic execution reference, not proof of real execution.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments: {values: ["{{ var('price_source') }}"]}
+      - name: product_id
+        description: Base/quote exchange pair.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments: {values: [BTC-USD, ETH-USD, SOL-USD]}
+      - name: traded_at
+        description: Synthetic execution instant; UTC end-of-day cutoff is exclusive next midnight.
+        data_tests: [not_null]
+      - name: trade_date
+        description: UTC execution date, derived explicitly from traded_at.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_date')", field: date_day}
+      - name: price_date
+        description: Day of reference daily candle; must equal UTC trade_date for this generator.
+        data_tests: [not_null]
+      - name: side
+        description: Synthetic BUY or SELL, without inventory simulation.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments: {values: [BUY, SELL]}
+      - name: status
+        description: Matched executions only; unexpected statuses fail validation rather than silently disappear.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments: {values: [MATCHED]}
+      - name: quantity
+        description: Positive base-asset quantity; never sum quantities across assets.
+        data_tests: [not_null]
+      - name: reference_close
+        description: Immutable daily close snapshot used by synthetic generator.
+        data_tests: [not_null]
+      - name: slippage_bps
+        description: Synthetic execution slippage, integer -25..25 bps.
+        data_tests: [not_null]
+      - name: execution_price
+        description: Synthetic USD execution price, rounded per execution.
+        data_tests: [not_null]
+      - name: notional_usd
+        description: Rounded quantity times execution_price; input to trade volume, not revenue.
+        data_tests: [not_null]
+      - name: fee_usd
+        description: Fee rounded at execution grain; aggregate with SUM, never recalculate on a total.
+        data_tests: [not_null]
+  - name: stg_asset_prices
+    description: One source/product/UTC day through cutoff; live Coinbase in demo and fake references only in test DB.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [source, product_id, price_date]}
+    columns:
+      - name: price_key
+        description: Source/product/day surrogate key.
+        data_tests: [unique, not_null]
+      - name: asset_key
+        description: Source/product surrogate key, repeated over days.
+        data_tests: [not_null]
+      - name: source
+        description: Explicit price_source variable.
+        data_tests: [not_null]
+      - name: product_id
+        description: Exchange trading pair.
+        data_tests: [not_null]
+      - name: price_date
+        description: Completed UTC candle day.
+        data_tests: [not_null]
+      - name: close_price
+        description: Provider daily close in USD, not actual trade execution price.
+        data_tests: [not_null]
+  - name: dim_assets
+    description: One price provider/product. Never join on product alone across providers.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [source, product_id]}
+    columns:
+      - name: asset_key
+        description: Source/product key.
+        data_tests: [unique, not_null]
+      - name: source
+        description: Price provider.
+        data_tests: [not_null]
+      - name: product_id
+        description: Exchange pair.
+        data_tests: [not_null]
+      - name: base_asset
+        description: Base unit BTC, ETH or SOL.
+        data_tests: [not_null]
+      - name: quote_currency
+        description: Quote currency USD.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments: {values: [USD]}
+  - name: dim_date
+    description: One UTC calendar day from earliest included customer/trade date to configured as_of_date; no CURRENT_DATE.
+    columns:
+      - name: date_day
+        description: Calendar date primary key.
+        data_tests: [unique, not_null]
+      - name: year_number
+        description: Calendar year.
+      - name: quarter_number
+        description: Calendar quarter 1..4.
+      - name: month_number
+        description: Calendar month 1..12.
+      - name: day_of_month
+        description: Day number 1..31.
+      - name: iso_day_of_week
+        description: ISO weekday Monday 1 through Sunday 7.
+      - name: is_weekend
+        description: True on Saturday/Sunday.
+      - name: month_start
+        description: First calendar day of month.
+  - name: fact_trades
+    description: One dataset/trade after LEFT JOIN enrichment on full natural keys; no recomputation of stored money.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [dataset_id, trade_id]}
+    columns:
+      - name: trade_key
+        description: Execution primary surrogate key inherited from staging.
+        data_tests: [unique, not_null]
+      - name: customer_created_at
+        description: Customer join evidence; NULL fails test if dimension missing.
+        data_tests: [not_null]
+      - name: calendar_date
+        description: Calendar join evidence.
+        data_tests: [not_null]
+      - name: market_close_price
+        description: Current daily close context; kept distinct from immutable synthetic reference_close.
+        data_tests: [not_null]
+      - name: base_asset
+        description: Matched asset dimension evidence.
+        data_tests: [not_null]
+      - name: quote_currency
+        description: Quote unit inherited from dim_assets.
+        data_tests: [not_null]
+  - name: mart_daily_trading
+    description: One dataset/UTC day with executions, all assets/sides combined; active customers calculated DISTINCT directly at this grain.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [dataset_id, trade_date]}
+    columns:
+      - name: dataset_id
+        description: Selected dataset.
+        data_tests: [not_null]
+      - name: trade_date
+        description: UTC day with at least one execution; zero-trade days are not filled.
+        data_tests: [not_null]
+      - name: as_of_date
+        description: Explicit report snapshot cutoff.
+        data_tests: [not_null]
+      - name: trade_count
+        description: COUNT of matched execution rows.
+        data_tests: [not_null]
+      - name: active_customers
+        description: COUNT DISTINCT customer_id for the entire day; do not sum over asset/side slices or dates.
+        data_tests: [not_null]
+      - name: trade_volume_usd
+        description: SUM notional_usd; trading activity, never called revenue.
+        data_tests: [not_null]
+      - name: fees_usd
+        description: SUM fee_usd already rounded per trade.
+        data_tests: [not_null]
+  - name: mart_customer_summary
+    description: One eligible dataset/customer as of UTC cutoff, including never-traded customers via LEFT JOIN. Demo behavior rules only, no RFM.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [dataset_id, customer_id]}
+    columns:
+      - name: customer_key
+        description: Dataset/customer primary key.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments: {to: "ref('stg_customers')", field: customer_key}
+      - name: dataset_id
+        description: Selected dataset.
+        data_tests: [not_null]
+      - name: customer_id
+        description: Natural customer UUID, scoped by dataset.
+        data_tests: [not_null]
+      - name: created_at
+        description: Original eligible customer creation instant.
+      - name: as_of_date
+        description: Explicit UTC report date, independent of execution date of dbt.
+        data_tests: [not_null]
+      - name: first_trade_date
+        description: Earliest included UTC trade date; NULL if never traded by cutoff.
+      - name: last_trade_date
+        description: Latest included UTC trade date; NULL if never traded by cutoff.
+      - name: days_since_last_trade
+        description: as_of_date minus last_trade_date; NULL if never traded, never negative.
+      - name: total_trades
+        description: Execution count through cutoff; zero if never traded.
+        data_tests: [not_null]
+      - name: total_volume_usd
+        description: SUM per-trade notional; zero if never traded.
+        data_tests: [not_null]
+      - name: total_fee_usd
+        description: SUM per-trade fees; zero if never traded.
+        data_tests: [not_null]
+      - name: activity_segment
+        description: Demo behavior rule never_traded, active recency <=30d, at_risk 31..59d, inactive >=60d; ignores synthetic profile.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments: {values: [never_traded, active, at_risk, inactive]}

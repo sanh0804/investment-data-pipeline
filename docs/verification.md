@@ -1,8 +1,8 @@
-# Verification — chặng 1 và 2A
+# Verification — chặng 1, 2A và 2B
 
-Trạng thái hiện tại: chặng 1 có commit `4153807`; chặng 2A đã được kiểm chứng ở
-phần cuối tài liệu. Phần chặng 1 giữ bằng chứng lịch sử trước commit; những dòng
-“chưa commit/chưa ETH-SOL” trong phần đó không mô tả trạng thái sau 2A.
+Trạng thái hiện tại: chặng 1 có commit `4153807`, chặng 2A có commit `933071b`.
+Kết quả 2B ở cuối tài liệu. Các phần trước giữ bằng chứng lịch sử tại thời điểm
+kiểm chứng; các dòng “chưa commit/chưa dbt” trong đó không mô tả trạng thái sau 2B.
 
 Ngày kiểm tra: 2026-11-01 (Asia/Ho_Chi_Minh). Kết quả dưới đây là các lệnh đã chạy
 trên máy local; phân biệt dữ liệu API live với unit tests dùng dữ liệu giả.
@@ -250,3 +250,135 @@ vẫn healthy. `.env` local chỉ đổi START_DATE sang 2026-05-01, giữ crede
 - Chưa thêm run-status table, scheduler, dbt/reconciliation models, Airflow, Metabase hoặc CI.
 - Chưa mô phỏng funds, balances, holdings, P&L, SCD2 hoặc retention.
 - Chưa commit thay đổi 2A hoặc push. Dừng ở cuối 2A để user review.
+
+## Chặng 2B — kết quả phiên 2026-11-01, rà soát cuối 2026-11-02
+
+### Review, commit và môi trường
+
+- Đã đọc code, docs, diff/cached diff, schema thực tế bằng information_schema và
+  source counts: raw=20, prices=540, customers=1000, trades=50000.
+- Trước khi sửa 2B, đã rà candidate filenames/content: không có .env, virtualenv,
+  local data hoặc password local. Reviewed staged list rồi commit 2A thành
+  `933071b Complete stage 2A: multi-asset prices and deterministic synthetic trades`.
+  Không tạo commit rỗng và không push remote.
+- Python thực tế 3.13.5. dbt-postgres 1.11.0 yêu cầu Python >=3.10.0, dbt-core
+  1.11.0 yêu cầu >=3.10 theo installed package metadata. Adapter PyPI có classifier
+  Python 3.13; cài/build thành công trong .venv-dbt riêng, psycopg2-binary 2.9.13.
+- Collector requirements không thay đổi; `python -m pytest -q` vẫn **29 passed**,
+  collector `pip check` không broken requirements. dbt packages không cài vào .venv.
+- Credentials từ env qua profiles/wrapper; không ghi password vào YAML/CLI arguments.
+  DBT_SCHEMA=market compile đã được thử: bị từ chối trước khi ghi source tables.
+
+### Models và dbt build demo
+
+Lệnh đã chạy:
+
+```bash
+.venv/bin/python scripts/run_dbt.py build --no-partial-parse --vars '{"dataset_id":"portfolio-v1","as_of_date":"2026-10-27"}'
+```
+
+Kết quả: **8 models, 88 data tests; PASS=96, WARN=0, ERROR=0, SKIP=0**.
+Output vào analytics; sources synthetic/market hiện có. Không gọi API hoặc sinh lại
+synthetic trong chặng 2B.
+
+| Model | Materialization | Rows thực tế |
+| --- | --- | ---: |
+| stg_customers | view | 1000 |
+| stg_trades | view | 50000 |
+| stg_asset_prices | view | 540 |
+| dim_assets | table | 3 |
+| dim_date | table | 210 |
+| fact_trades | table | 50000 |
+| mart_daily_trading | table | 116 |
+| mart_customer_summary | table | 1000 |
+
+Daily mart có 116 ngày có trades, không fill ngày zero-trade; không nhầm với
+180 ngày coverage giá. dim_date còn bao gồm customer creation từ 2026-04-01.
+Cutoff inclusive 2026-10-27 UTC; max trade_date 2026-10-27, không có trade vượt cutoff.
+
+### Đối soát trên dữ liệu synthetic portfolio-v1
+
+Đã chạy sql/verify_2b.sql qua psql với ON_ERROR_STOP=1 và query output tables:
+
+| Layer | Trade count | Trade volume USD | Fees USD |
+| --- | ---: | ---: | ---: |
+| staging | 50000 | 615063969.51 | 615063.60 |
+| fact | 50000 | 615063969.51 | 615063.60 |
+| daily mart | 50000 | 615063969.51 | 615063.60 |
+| customer summary | 50000 | 615063969.51 | 615063.60 |
+
+Trade volume không phải revenue; các executions và fees ở bảng này hoàn toàn
+synthetic. Giá source daily close ở market vẫn là API live đã thu thập từ 2A.
+
+- Fact không mất hoặc nhân đôi execution: unique tests, row-level preservation
+  và totals reconciliation đều pass. Không dùng DISTINCT fact để chữa fan-out.
+- Whole-range active customers = 900, COUNT DISTINCT trực tiếp từ fact, không cộng daily counts.
+- Summary giữ 1000 customers của dataset đã tạo trước cutoff; customer-count difference=0.
+- Segments từ trades: active=600, inactive=300, never_traded=100; không SELECT profile.
+- 100 zero-trade customers đều totals=0, first/last dates và recency=NULL;
+  invalid-never-traded counter=0. Không có customer bị mất vì INNER JOIN.
+- Tests relationships, unique/not_null, accepted values, cutoff, money và các đối soát
+  đều pass. docs/models.md và models/schema.yml ghi grain/keys/columns/metrics/lineage.
+
+### Fresh migrations và fixture thực thi qua chính dbt models
+
+Đã chạy `scripts/verify_dbt.py` thành công. Lần cuối:
+
+- Server `de_pj_2b_test-postgres_test-1`, host port 55433, database mới
+  `verify_2b_4d859dd00714`. Lần thành công trước đó là `verify_2b_6c6afd061714`.
+- `docker inspect`: HostConfig.Tmpfs có /var/lib/postgresql/data, Mounts=[];
+  không mount volume PostgreSQL demo. Test DB/container được giữ lại để review.
+- Chạy migration 001/002 trên database mới, xác minh schema_migrations có 2 rows,
+  bảng chuẩn rỗng và volume_base tồn tại; rerun không áp dụng lại migrations.
+- Fixture chỉ load vào fixture_input. Các bảng market.daily_prices và synthetic.trades
+  chuẩn trong test DB vẫn rỗng sau builds; demo DB không nhận fixture.
+
+Mỗi case chạy cùng 8 models và 88 data tests, không có bản SQL models riêng cho fixture:
+
+| Case | as_of_date UTC | Kết quả build | Kiểm chứng bổ sung |
+| --- | --- | --- | --- |
+| baseline | 2026-05-03 | 96 nodes thành công | 4 customers/6 trades; mọi expected JSON group khớp |
+| early | 2026-05-01 | 96 nodes thành công | Chỉ 2 trades ngày đầu; khách chưa trade ở cutoff vẫn còn |
+| threshold | 2026-06-02 | 96 nodes thành công | Recency 30 → active, 31 → at_risk |
+| inactive | 2026-07-02 | 96 nodes thành công | Recency 60/61 → inactive; zero-trade vẫn NULL/never_traded |
+
+Baseline output dbt được SQL-query và đối chiếu trực tiếp
+`tests/fixtures/reconciliation/expected_totals.json`: 475.94 USD notional, 0.48 USD
+phí, đúng các totals theo customer/product/side/date, cả customer không giao dịch.
+Row-level quantity/execution/notional/fee cũng khớp CSV. Daily active customers
+độc lập là [1,1,2], gồm ngày một khách giao dịch hai assets nhưng chỉ được đếm một lần.
+Customer fixture profile ceased vẫn active tại baseline, chứng minh segment từ behavior.
+
+Test inputs có thêm dataset distractor cùng customer/trade UUID, provider khác cùng
+product/day và future customer/trade. Output selected fixture-v1 vẫn đúng 4 customers/6
+trades ở baseline, không fan-out hoặc leak future rows. Các assertions ngày/recency,
+zero totals và NULL semantics đều thực hiện trên output dbt SQL, không chỉ fixture Python.
+
+Script so checksum toàn bộ raw/market/synthetic demo tables trước/sau; kết quả
+`demo_sources_unchanged=true` ở cả hai lần chạy thành công. Không xóa DB/volume/data.
+Logs, manifests, run_results và report.json nằm trong ignored data/verify_2b_*/;
+artifacts mỗi case có target path riêng. Chúng là kiểm chứng fixture/synthetic,
+không phải lần thu thập API live mới.
+
+### Docs và giới hạn còn lại
+
+`dbt docs generate` đã chạy thành công, catalog.json ở analytics/target. README
+có setup/build/query/fixture commands; docs/models.md, decisions và learning-notes
+đã cập nhật. Lần compile ban đầu guard schema gặp tên audit schema nội bộ của dbt;
+đã sửa macro luôn trả validated target schema, rồi build/test thành công như trên.
+
+Rà soát cuối: dbt `pip check` không broken requirements; diff/whitespace checks
+không lỗi, staged area rỗng. Candidate file scan không có password local, .env,
+virtualenv, dbt target/logs hoặc local data. Cả hai PostgreSQL services healthy;
+source counts vẫn raw=20, prices=540, customers=1000, trades=50000.
+
+- Chưa chạy docs serve (chỉ ghi lệnh tùy chọn), chưa deploy dashboard hoặc CI.
+- Chưa thử Python/OS khác; direct dbt versions đã pin, chưa có transitive lockfile.
+- Chưa có dbt role riêng SELECT-only trên sources; đang dùng tài khoản local dev,
+  bảo vệ schema output bằng macro guard, không tuyên bố đây là database permission boundary.
+- Chưa kiểm tra concurrent source writes, concurrent builds cùng schema, production
+  performance/load, backup/restore hoặc fault injection. Staging views thay đổi theo
+  sources; cần dbt build lại tables sau source updates để đối soát cùng snapshot.
+- Chưa có incremental models/historical snapshots; mỗi schema là một dataset/cutoff build.
+- Chưa triển khai Airflow, Metabase, AI, SCD2, retention, RFM scoring, balances, holdings hoặc P&L.
+- Chưa commit thay đổi 2B hoặc push. Dừng ở cuối 2B để user review.

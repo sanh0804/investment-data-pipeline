@@ -1,12 +1,12 @@
 # Investment Data Pipeline & Analytics
 
 Personal portfolio project cho Data Engineering / Data Analytics.
-Hiện hoàn thành chặng 1 và 2A: giá ngày BTC/ETH/SOL thật từ Coinbase Exchange,
-1.000 khách hàng và 50.000 giao dịch đã khớp **hoàn toàn synthetic**.
+Hiện hoàn thành tới chặng 2B: giá ngày BTC/ETH/SOL thật từ Coinbase Exchange,
+1.000 khách hàng và 50.000 giao dịch đã khớp **hoàn toàn synthetic**, cùng dbt analytics.
 
 Stack đã chốt: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose,
-GitHub Actions. Chưa dựng dbt, Airflow, Metabase hay CI; dừng sau 2A để review.
-Không mô phỏng số dư, holdings, P&L, SCD2 hay retention.
+GitHub Actions. Đã có dbt Core; chưa dựng Airflow, Metabase hay CI; dừng sau 2B để review.
+Không mô phỏng số dư, holdings, P&L, SCD2, retention hay RFM scoring.
 
 ## Setup macOS
 
@@ -98,7 +98,8 @@ Coinbase daily candles (live)
   → synthetic generator đọc snapshot daily closes
   → synthetic.datasets → synthetic.customers → synthetic.trades
 
-Fixture riêng: tests/fixtures/reconciliation → unit tests; không có loader vào DB live
+market/synthetic → dbt staging → dimensions/fact → daily/customer marts
+Fixture riêng → PostgreSQL test tmpfs → cùng dbt models; không load fixture vào DB live
 ```
 
 Raw grain: một HTTP attempt, PK `fetch_id`, unique `(run_id,attempt_number)`.
@@ -198,7 +199,8 @@ Bộ nhỏ [tests/fixtures/reconciliation](tests/fixtures/reconciliation/README.
 4 customers, 6 trades, giá hoàn toàn giả, **475.94 USD notional và 0.48 USD phí**.
 Có CSV riêng và expected totals viết rõ theo customer/product/side/date, gồm ca
 rounding 0.055 → 0.06 và 30.075 → 30.08. Source `fixture` không hợp lệ với live
-schema; unit tests chỉ đọc file. Chưa dựng dbt models hoặc reconciliation workflow.
+schema; unit tests chỉ đọc file. Chặng 2B còn chạy chính SQL dbt models trên fixture
+ở DB test và đối chiếu expected JSON.
 
 ## File chính và vận hành
 
@@ -213,6 +215,9 @@ schema; unit tests chỉ đọc file. Chưa dựng dbt models hoặc reconciliat
 | `pipeline/verify_stage2a.py`, `verify_idempotency.py` | Verification, replay |
 | `sql/verify_2a.sql` | SQL kiểm tra coverage, FK, thời gian và totals |
 | `tests/fixtures/reconciliation/` | Dataset nhỏ và expected totals cho 2B |
+| `analytics/models/`, `analytics/tests/`, `analytics/macros/` | dbt models, data tests và scope/key macros |
+| `scripts/run_dbt.py`, `scripts/verify_dbt.py`, `compose.test.yaml` | Env wrapper và isolated fixture/migration tests |
+| `docs/models.md`, `sql/verify_2b.sql` | Analytics contract và SQL đối soát demo |
 | `docs/` | Quyết định, kiến thức và bằng chứng đã chạy |
 
 Xem `docker compose ps`, `docker compose logs --tail=100 postgres` khi lỗi.
@@ -221,3 +226,95 @@ Không xóa volume/data để sửa lỗi. Image khóa major `postgres:16-bookwo
 image digest; Python khóa direct dependency versions, chưa có transitive lockfile.
 Chưa có scheduler, alerting, run-status table, production roles hoặc kiểm chứng concurrency
 cho collector. Các giới hạn/chưa chạy được ghi trong verification.
+
+## dbt analytics — chặng 2B
+
+Python hiện có 3.13.5. dbt-postgres 1.11.0 công bố hỗ trợ Python 3.13;
+đã cài và build thực tế thành công với dbt Core 1.11.0 trên máy này.
+Dùng môi trường riêng để không thay dependency collector:
+
+```bash
+python3 -m venv .venv-dbt
+.venv-dbt/bin/python -m pip install -r requirements-dbt.txt
+.venv-dbt/bin/dbt --version
+.venv-dbt/bin/python -m pip check
+```
+
+Project/profiles ở `analytics/`, không cần dbt packages bên ngoài. Profile không có
+credentials literal. Wrapper đọc `.env`, giữ ưu tiên shell env và truyền password
+qua DBT_ENV_SECRET_PASSWORD, không qua command arguments.
+DBT_DATABASE mặc định POSTGRES_DB; DBT_SCHEMA mặc định analytics, chỉ được là
+analytics hoặc analytics_* để bảo vệ source schemas. Sources mặc định synthetic/market.
+
+```bash
+.venv/bin/python scripts/run_dbt.py build --vars '{"dataset_id":"portfolio-v1","as_of_date":"2026-10-27"}'
+```
+
+as_of_date inclusive UTC tới trước 2026-10-28T00:00:00Z, không dùng CURRENT_DATE.
+dataset_id/as_of_date mặc định cố định trong dbt_project.yml, có thể override qua
+--vars. Customer/trade chỉ được giữ nếu created_at/traded_at trước hết ngày chốt.
+Một schema chứa một dataset/cutoff snapshot; dùng DBT_SCHEMA=analytics_other_snapshot
+khi muốn giữ snapshot khác song song. Build thay output dbt, không sửa source data.
+
+8 models:
+
+- stg_customers, stg_trades, stg_asset_prices: views, scope rõ dataset/source/cutoff.
+- dim_assets, dim_date: source/product và calendar UTC.
+- fact_trades: một execution/dataset, LEFT JOIN trên full customer/asset/price keys.
+- mart_daily_trading: một dataset/ngày có trade, tổng mọi asset/side; COUNT DISTINCT
+  trực tiếp theo ngày, không cộng distinct counts từ các nhóm con.
+- mart_customer_summary: giữ cả zero-trade customers; totals zero, dates/recency NULL.
+
+Trade volume = SUM(notional_usd), fees = SUM(fee_usd) đã round mỗi trade; không gọi
+volume là revenue. Segment demo: never_traded; active <=30 ngày; at_risk 31..59;
+inactive >=60. Tính từ trades tới cutoff, không SELECT activity_profile của generator.
+Không RFM/churn inference. [Models, columns, grain, keys và lineage](docs/models.md).
+
+Demo đã build 8 models + 88 data tests; các tầng khớp 50.000 trades,
+615.063.969,51 USD volume và 615.063,60 USD phí; summary đủ 1.000 customers.
+Daily mart có 116 ngày có trade, không tự thêm zero-trade days.
+Grain đã kiểm tra là (dataset_id,trade_date), không phải ngày × asset × side.
+Regular customers giao dịch cách 3–4 ngày theo hai lịch chung (55/56 trades),
+ceased dùng lịch 55 trades trong 120 ngày đầu. Union lịch regular 91 ngày với
+ceased 55 ngày, trùng 30 ngày → 116 ngày trade và 64 ngày zero-trade.
+Đây là đặc tính dữ liệu synthetic, không sửa để làm đẹp; asset/side breakdown đọc fact.
+
+```bash
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_2b.sql
+.venv/bin/python scripts/run_dbt.py docs generate
+# Tùy chọn mở docs local:
+.venv/bin/python scripts/run_dbt.py docs serve --port 8081
+```
+
+Truy vấn kiểm tra nhanh:
+
+```sql
+SELECT count(*), sum(notional_usd), sum(fee_usd) FROM analytics.fact_trades;
+SELECT sum(trade_count), sum(trade_volume_usd), sum(fees_usd) FROM analytics.mart_daily_trading;
+SELECT activity_segment, count(*) FROM analytics.mart_customer_summary GROUP BY 1;
+-- Global distinct: không SUM active_customers của daily mart.
+SELECT count(DISTINCT customer_id) FROM analytics.fact_trades;
+```
+
+### Fixture thực thi qua dbt và fresh migration test
+
+```bash
+.venv/bin/python scripts/verify_dbt.py
+```
+
+Script tự khởi động compose.test.yaml, project de_pj_2b_test, bind 127.0.0.1:55433.
+Test PostgreSQL dùng tmpfs **không mount volume demo**. Có thể đổi TEST_POSTGRES_PORT
+nếu bận; script từ chối dùng cùng port với demo. Tạo database verify_2b_<UUID> mới
+mỗi lần, chạy migrations 001/002 và rerun, rồi load CSV vào fixture_input (không
+write market/synthetic). Không gọi API, không tạo 50k trades mới, không xóa DB/volume.
+
+Chạy chính 8 models/88 tests ở 4 cutoffs: 2026-05-03, 2026-05-01, 2026-06-02,
+2026-07-02. Đối chiếu expected_totals.json ở baseline bằng SQL trên output dbt
+cho global/customer/product/side/date; kiểm tra row-level money, daily active [1,1,2],
+LEFT JOIN zero-trade, cutoff và recency 30/31/60. Thêm distractor dataset cùng UUID,
+provider khác cùng pair/day và future rows để kiểm tra fan-out/scope.
+
+Test DB/container được giữ để review; logs, manifest và run_results nằm trong ignored
+data/verify_2b_*/. tmpfs chỉ là dữ liệu test tạm, không phải persistence/backup của demo.
+Collector .venv và nguồn demo được giữ; source checksums được so sánh trước/sau.
+Chưa đưa tests vào CI. analytics/target, analytics/logs và .venv-dbt được Git ignore.

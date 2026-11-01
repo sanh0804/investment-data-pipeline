@@ -1,0 +1,29 @@
+name: investment_analytics
+version: '1.0.0'
+config-version: 2
+profile: investment_analytics
+require-dbt-version: ['>=1.11.0', '<1.12.0']
+model-paths: [models]
+test-paths: [tests]
+macro-paths: [macros]
+flags:
+  send_anonymous_usage_stats: false
+vars:
+  dataset_id: portfolio-v1
+  as_of_date: '2026-10-27'
+  price_source: coinbase_exchange
+  customer_source_schema: synthetic
+  price_source_schema: market
+models:
+  investment_analytics:
+    +persist_docs:
+      relation: true
+      columns: true
+    staging:
+      +materialized: view
+    dimensions:
+      +materialized: table
+    facts:
+      +materialized: table
+    marts:
+      +materialized: table

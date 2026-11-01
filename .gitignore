@@ -2,6 +2,10 @@
 .env.*
 !.env.example
 .venv/
+.venv-dbt/
+analytics/target/
+analytics/logs/
+analytics/dbt_packages/
 __pycache__/
 *.py[cod]
 .pytest_cache/
