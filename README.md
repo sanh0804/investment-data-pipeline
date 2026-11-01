@@ -1,11 +1,12 @@
 # Investment Data Pipeline & Analytics
 
 Personal portfolio project cho Data Engineering / Data Analytics.
-Hiện hoàn thành tới chặng 2B: giá ngày BTC/ETH/SOL thật từ Coinbase Exchange,
-1.000 khách hàng và 50.000 giao dịch đã khớp **hoàn toàn synthetic**, cùng dbt analytics.
+Hiện hoàn thành tới chặng 3: giá ngày BTC/ETH/SOL thật từ Coinbase Exchange,
+1.000 khách hàng và 50.000 giao dịch đã khớp **hoàn toàn synthetic**, dbt analytics
+và một dashboard Metabase local.
 
 Stack đã chốt: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose,
-GitHub Actions. Đã có dbt Core; chưa dựng Airflow, Metabase hay CI; dừng sau 2B để review.
+GitHub Actions. Đã có dbt Core/Metabase; chưa dựng Airflow hay CI; dừng sau 3 để review.
 Không mô phỏng số dư, holdings, P&L, SCD2, retention hay RFM scoring.
 
 ## Setup macOS
@@ -38,7 +39,8 @@ Giữ nguyên password nếu dùng database chặng 1; sửa env không tự đ�
 trong volume đã có. Không commit `.env`. API đã chọn không dùng API key.
 
 ```bash
-docker compose up -d --wait
+.venv/bin/python scripts/init_metabase_env.py
+docker compose up -d --wait postgres
 .venv/bin/python -m pipeline.init_db
 ```
 
@@ -318,3 +320,107 @@ Test DB/container được giữ để review; logs, manifest và run_results n�
 data/verify_2b_*/. tmpfs chỉ là dữ liệu test tạm, không phải persistence/backup của demo.
 Collector .venv và nguồn demo được giữ; source checksums được so sánh trước/sau.
 Chưa đưa tests vào CI. analytics/target, analytics/logs và .venv-dbt được Git ignore.
+
+## Metabase dashboard — chặng 3
+
+Truy cập **http://localhost:3000/dashboard/2** trên máy hiện tại. Khi tái tạo ở
+metadata DB mới, ID có thể khác: setup script in URL thực tế và lưu data/metabase-state.json.
+Dashboard: **Investment Pipeline | Synthetic Trading**. Nhãn trên dashboard ghi rõ
+synthetic customers/executions, Coinbase daily-close reference, portfolio-v1 và cutoff
+2026-10-27 UTC. Không gọi trade volume là revenue.
+
+### Setup và tái tạo
+
+Dữ liệu analytics từ 2B phải có sẵn. Với clone mới cần chạy các bước collector,
+synthetic và dbt ở trên trước; Git không chứa database/volume của máy hiện tại.
+
+```bash
+.venv/bin/python scripts/init_metabase_env.py
+.venv/bin/python scripts/setup_metabase_role.py
+docker compose up -d --wait metabase
+.venv/bin/python scripts/setup_metabase.py
+.venv/bin/python scripts/verify_metabase.py
+```
+
+init_metabase_env chỉ tạo secret còn thiếu/placeholder và giữ giá trị đã có,
+không tự rotate password/encryption key. POSTGRES_PASSWORD phải được cấu hình
+như phần setup; secrets Metabase riêng được sinh tự động vào .env mode 0600.
+Đăng nhập bằng METABASE_ADMIN_EMAIL (mặc định admin@investment.local) và
+METABASE_ADMIN_PASSWORD trong .env; mở file bằng editor để xem, không đưa vào Git.
+Đây là local administrator của ứng dụng, khác với database query user.
+
+Image metabase/metabase:v0.64.1 đã kiểm tra manifest có linux/arm64 và đã chạy native
+arm64 trên máy này. App bind loopback 3000; có thể đổi METABASE_PORT nếu bận.
+Không sửa ports/services/volumes cũ. metabase_db là PostgreSQL metadata riêng,
+không publish host port, dùng named volume metabase_metadata. Không dùng H2.
+Metabase kết nối business DB qua postgres:5432 trong Compose network bằng
+**metabase_reader**, không dùng investment/owner. Role chỉ có analytics SELECT,
+không có UPDATE/INSERT/DELETE/TRUNCATE/schema CREATE; default privileges giữ SELECT
+cho bảng/view do cùng dbt owner tạo mới. Setup role cần chạy bằng owner local,
+nhưng dashboard query connection chỉ lưu reader credentials.
+
+Giữ .env cùng METABASE_ENCRYPTION_KEY và metadata volume để có thể đọc lại database
+credentials đã mã hóa. Không xóa/reset volume để xử lý login hoặc startup lỗi.
+Các lệnh setup tái chạy update đúng collection/cards/dashboard theo tên, không nhân
+bản project dashboard. Script quản lý layout và nội dung này; thay SQL trong repo
+rồi chạy lại setup sẽ cập nhật cards tương ứng. Metabase API không versioned;
+script đã kiểm tra với OpenAPI của chính container v0.64.1.
+
+### Cards và filters
+
+SQL của 9 cards ở metabase/cards/*.sql:
+
+- Bốn KPI: trade volume USD, fees USD, matched trades, distinct active customers.
+- Hai biểu đồ ngày: volume và fees; LEFT JOIN dim_date để đủ 180 ngày, có 64 ngày zero.
+- Stacked bar volume theo asset và BUY/SELL, query fact; không đổi grain daily mart.
+- Customer segments và bảng top 15 khách theo tổng phí: snapshot cố định 2026-10-27.
+
+From/To là ngày UTC inclusive, mặc định 2026-05-01/2026-10-27; asset BTC/ETH/SOL
+mặc định tất cả. Filters chỉ nối vào 7 trading cards. Distinct customers được tính
+trực tiếp từ fact ở phạm vi đã lọc, không cộng distinct theo ngày/tài sản/side.
+Calendar padding lọc trades trước LEFT JOIN; không đặt asset filter ở WHERE sau join
+vì sẽ làm mất zero-trade days. Range demo luôn giới hạn trong 180 ngày dữ liệu.
+
+Hai customer cards không có template tags hay filter mappings. Chúng giữ đủ 1.000
+khách tại cutoff, kể cả khi chọn tháng 6/ETH; đây không phải customer segmentation
+được tính lại theo asset hoặc date filter. Muốn đổi cutoff snapshot phải dbt build
+với cấu hình mới và sửa dashboard contract có chủ đích; dashboard này không giả lập
+snapshot mới bằng filter trên snapshot cũ.
+
+### Kiểm chứng và ảnh thật
+
+```bash
+.venv/bin/python scripts/verify_metabase.py
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_3.sql
+# Persistence: không xóa hoặc recreate metadata volume.
+docker compose restart metabase
+docker compose up -d --wait metabase
+.venv/bin/python scripts/verify_metabase.py
+```
+
+Verifier gọi các cards thật qua Metabase API, so với SQL bound độc lập trên PostgreSQL
+bằng reader role; kiểm tra toàn bộ 180/30 daily rows, asset/side totals, top 15, segments,
+filter mappings và UPDATE bị ACL từ chối ngay cả khi tắt transaction_read_only.
+Đã so dashboard/card IDs, SQL, filter definitions và visualization settings trước/sau restart.
+
+| Phạm vi trade filters | Trades | Volume USD | Fees USD | Distinct customers |
+| --- | ---: | ---: | ---: | ---: |
+| Mặc định | 50000 | 615063969.51 | 615063.60 | 900 |
+| 2026-06-01..2026-06-30 | 9300 | 100591957.72 | 100591.72 | 900 |
+| ETH, toàn kỳ | 16667 | 17344749.48 | 17345.27 | 300 |
+| Tháng 6 + ETH | 3100 | 2633325.78 | 2633.37 | 300 |
+
+Ảnh chụp **UI thật, không mock**, ở viewport hẹp của in-app browser, chỉ thể hiện
+phần dashboard đang thấy; không phải ảnh ghép toàn bộ dashboard desktop:
+[default volume/fees](docs/screenshots/metabase-default-kpis.jpg),
+[default trade/customer counts](docs/screenshots/metabase-default-counts.jpg),
+[tháng 6 + ETH](docs/screenshots/metabase-june-eth.jpg).
+
+Đã đăng nhập UI local, thao tác date picker và asset dropdown, xác minh KPI/snapshot.
+Chrome native automation bị timeout nên chưa xác minh layout desktop bằng Chrome.
+Trên Mac, bạn chỉ cần mở URL trong Chrome/Safari, đăng nhập bằng .env và kiểm tra
+bố cục rộng đầy đủ; không cần tạo cards/filters thủ công. Password/email chỉ dùng local,
+chưa cấu hình SMTP hoặc reset password qua email. Không bật public dashboard sharing.
+
+Tài liệu [verification](docs/verification.md) ghi bằng chứng và phần chưa chạy;
+không thêm Airflow, CI, AI, RFM hoặc retention ở chặng này.

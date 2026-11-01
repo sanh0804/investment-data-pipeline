@@ -119,3 +119,39 @@ scripts/verify_dbt.py chạy migrations/fixture models trên test server riêng.
    Chốt dataset/as_of_date UTC, lọc cả customer creation và trades, LEFT JOIN một
    aggregate theo dataset/customer; totals zero, dates/recency NULL. Chứng minh bằng
    fixture qua cùng dbt models với cutoffs sớm/muộn và expected totals độc lập.
+
+## Chặng 3 — Metabase
+
+Flow: analytics tables/views → metabase_reader SELECT → saved native SQL cards →
+Metabase dashboard. Cấu hình/cards/layout lưu trong PostgreSQL metadata riêng và
+volume riêng, không ở business DB. SQL ở metabase/cards; provisioning/grants ở
+scripts/setup_metabase*.py; SQL độc lập ở sql/verify_3.sql và verifier API.
+
+### Ba kiến thức cần hiểu
+
+1. **Grain và calendar padding.** Daily mart hiện một dataset/ngày, không có asset/side.
+   Breakdown phải đọc fact. 116 ngày trade là union các lịch synthetic, không phải
+   thiếu giá. LEFT JOIN dim_date lên trades đã filter để thể hiện 64 ngày zero-trade;
+   đặt asset filter sai trong WHERE sau LEFT JOIN sẽ làm biến mất zero days.
+2. **Filter scope và distinct customers.** Volume/fees/count cộng được, distinct không
+   cộng qua ngày/asset/side. June+ETH tính trực tiếp từ filtered fact ra 300 customers.
+   Customer summary là snapshot cutoff, không được thay nhãn/tổng theo filters vốn
+   chỉ áp cho trading cards. Labels và parameter mappings là một phần metric contract.
+3. **App state và least privilege.** Metabase administrator không đồng nghĩa query
+   bằng database owner. Reader phải bị ACL từ chối ghi ngay cả khi bỏ read-only default.
+   Questions/dashboard/filter definitions ở metadata DB bền vững; restart app phải
+   giữ chúng. Metadata volume và encryption key cần giữ cùng nhau ngoài Git.
+
+### Ba câu hỏi phỏng vấn
+
+1. Vì sao có 180 ngày giá nhưng daily mart chỉ có 116 rows, và chart làm sao hiện đủ?
+   Mart chỉ có ngày trade; generator đồng bộ lịch tạo 116 ngày. Calendar dimension
+   LEFT JOIN fact đã lọc, COALESCE totals=0; không chèn thêm dữ liệu nguồn để làm đẹp.
+2. Vì sao chọn ETH/tháng 6 không làm customer segments giảm còn 300 người?
+   Trading filters chọn scope fact, nhưng segment chart là snapshot 1000 khách tại
+   cutoff 2026-10-27; không có filter mapping. Muốn segmentation theo cohort khác
+   cần model/contract khác, không ngầm tái diễn giải snapshot hiện tại.
+3. Làm sao chứng minh dashboard không dùng owner và không mất khi restart?
+   Kiểm tra connection user, SELECT và thử UPDATE WHERE false với read_only=off để
+   thấy ACL deny; lưu IDs/SQL/filters/settings trước-sau restart, đối soát API cards
+   với SQL độc lập và kiểm tra metadata dùng PostgreSQL named volume riêng.

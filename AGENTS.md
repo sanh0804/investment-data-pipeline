@@ -3,9 +3,9 @@
 Personal portfolio project for Data Engineering / Data Analytics roles, on macOS.
 
 ## Scope and working rules
-- Current authorized scope: stage 2B — dbt-postgres analytics over existing data, tests, reconciliation and fixture execution through the same models in a separate test database. Stop after verification for user review.
+- Current authorized scope: stage 3 — one Metabase dashboard over existing analytics, durable separate metadata DB, read-only query role, SQL/filter/persistence/UI verification. Stop for user review.
 - Planned stack: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose, GitHub Actions. Later scope includes BTC/ETH/SOL, 1,000 simulated customers and 50,000 matched trades, SQL transformations, quality checks, reconciliation, customer summary and one dashboard. Airflow and CI come last.
-- Do not implement Airflow, Metabase, AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L in stage 2B.
+- Do not implement Airflow, CI, AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L in stage 3.
 - Inspect machine architecture and installed tools; never assume Intel or Apple Silicon.
 - Keep the repository small and understandable. Prefer explicit SQL and ordinary Python functions over extra frameworks.
 - Verify provider documentation and a real response before choosing timestamp/day semantics. Distinguish an exchange price from a market-wide price.
@@ -32,6 +32,10 @@ Personal portfolio project for Data Engineering / Data Analytics roles, on macOS
 - dbt environment: `python3 -m venv .venv-dbt`; `.venv-dbt/bin/python -m pip install -r requirements-dbt.txt`
 - dbt build: `.venv/bin/python scripts/run_dbt.py build --vars '{"dataset_id":"portfolio-v1","as_of_date":"2026-10-27"}'`
 - dbt fixture/migration integration: `.venv/bin/python scripts/verify_dbt.py`
+- Metabase: `.venv/bin/python scripts/init_metabase_env.py`; `.venv/bin/python scripts/setup_metabase_role.py`; `docker compose up -d --wait metabase`; `.venv/bin/python scripts/setup_metabase.py`
+- Dashboard verification: `.venv/bin/python scripts/verify_metabase.py`
+
+Dashboard daily mart grain stays dataset/day; use fact for asset/side filtering. Pad zero-trade days with dim_date. Compute filtered DISTINCT customers from fact, never sum daily distincts. Customer snapshot cards must not map trade date/asset filters. Keep Metabase metadata in its separate PostgreSQL/volume and use only metabase_reader for analytics queries.
 
 For dbt: preserve source schemas; write only analytics schemas. Use explicit UTC as_of_date, never CURRENT_DATE for demo reports. Join on complete dataset/source keys; active customers are distinct at the report grain, never summed across asset/side groups. Fixtures run through the same models in a new test DB, never live input tables.
 

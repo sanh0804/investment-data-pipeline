@@ -19,5 +19,51 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  metabase_db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: metabase
+      POSTGRES_USER: metabase_app
+      POSTGRES_PASSWORD: ${METABASE_DB_PASSWORD:?Set METABASE_DB_PASSWORD in .env}
+      TZ: UTC
+    volumes:
+      - metabase_metadata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U metabase_app -d metabase']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  metabase:
+    image: metabase/metabase:v0.64.1
+    ports:
+      - "127.0.0.1:${METABASE_PORT:-3000}:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: metabase_db
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: metabase_app
+      MB_DB_PASS: ${METABASE_DB_PASSWORD:?Set METABASE_DB_PASSWORD}
+      MB_ENCRYPTION_SECRET_KEY: ${METABASE_ENCRYPTION_KEY:?Set METABASE_ENCRYPTION_KEY}
+      MB_SITE_URL: http://localhost:${METABASE_PORT:-3000}
+      MB_ANON_TRACKING_ENABLED: 'false'
+      MB_CHECK_FOR_UPDATES: 'false'
+      JAVA_TIMEZONE: UTC
+    depends_on:
+      metabase_db:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, 'curl --fail --silent http://localhost:3000/api/health > /dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  metabase_metadata:

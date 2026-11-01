@@ -213,3 +213,34 @@ Bốn cutoffs kiểm tra dates/recency/segments và chống future-data leakage;
 Python fixture-only tests thay dbt. Artifacts mỗi test case ở target path riêng để
 không đè manifest/run_results của demo. So checksum các demo source tables trước/sau.
 Chưa thêm Airflow, Metabase, AI, CI, SCD2, retention, RFM, balances, holdings hoặc P&L.
+
+## 2026-11-02 — Chặng 3: Metabase local dashboard
+
+Commit 2B trước triển khai: 5993a26. Kiểm tra daily grain thật và document lịch
+synthetic trước khi dựng chart. Giữ 116 rows ở mart, không sửa generator/nguồn;
+zero days là reporting padding qua dim_date. Asset/side đọc fact.
+
+Chọn official image metabase/metabase:v0.64.1, Docker manifest có arm64, native
+arm64 đã chạy. Metadata tách sang service metabase_db và named volume riêng;
+không publish metadata port, không dùng H2. Giữ mọi service/port/volume cũ.
+Metabase bind localhost:3000. Password/encryption key sinh local vào ignored .env,
+helper chỉ fill missing/placeholders, không rotate existing secrets.
+
+Metabase dùng metabase_reader cho data source, SELECT analytics, không có table
+writes hoặc CREATE. Default privileges của owner giữ SELECT sau dbt rebuild.
+Metadata app user metabase_app chỉ thuộc server metadata; admin UI khác query user.
+
+Native SQL cards versioned trong repo, script API upsert theo collection/card/dashboard
+names để tái tạo không cần thao tác UI thủ công. API không versioned; code đã đối chiếu
+OpenAPI chạy trên chính container. Tài liệu nguồn:
+[Docker setup](https://www.metabase.com/docs/latest/installation-and-operation/running-metabase-on-docker),
+[API setup](https://www.metabase.com/articles/set-up-metabase-from-code-with-the-api).
+
+7 trading cards map From/To UTC/Asset, 2 snapshot cards không map. Trade volume ≠
+revenue; active customers DISTINCT trực tiếp. Customer snapshot cutoff cố định,
+không giả đổi segment theo trading filters. Banner/title ghi synthetic và Coinbase
+reference prices. Không dùng AI, public sharing, SMTP hoặc scheduled subscriptions.
+
+UI kiểm bằng in-app browser; screenshot lưu đúng viewport đang thấy sau khi scroll,
+không mock/composite. Native Chrome automation timeout nên để user review desktop
+trên Mac; toàn bộ dashboard setup, queries, filters và persistence đã thực hiện.

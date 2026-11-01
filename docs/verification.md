@@ -1,8 +1,8 @@
-# Verification — chặng 1, 2A và 2B
+# Verification — chặng 1, 2A, 2B và 3
 
-Trạng thái hiện tại: chặng 1 có commit `4153807`, chặng 2A có commit `933071b`.
-Kết quả 2B ở cuối tài liệu. Các phần trước giữ bằng chứng lịch sử tại thời điểm
-kiểm chứng; các dòng “chưa commit/chưa dbt” trong đó không mô tả trạng thái sau 2B.
+Trạng thái hiện tại: chặng 1 có commit `4153807`, 2A có `933071b`, 2B có `5993a26`.
+Kết quả chặng 3 ở cuối tài liệu. Các phần trước giữ bằng chứng lịch sử tại thời điểm
+kiểm chứng; các dòng “chưa commit/chưa Metabase” không mô tả trạng thái sau chặng 3.
 
 Ngày kiểm tra: 2026-11-01 (Asia/Ho_Chi_Minh). Kết quả dưới đây là các lệnh đã chạy
 trên máy local; phân biệt dữ liệu API live với unit tests dùng dữ liệu giả.
@@ -382,3 +382,158 @@ source counts vẫn raw=20, prices=540, customers=1000, trades=50000.
 - Chưa có incremental models/historical snapshots; mỗi schema là một dataset/cutoff build.
 - Chưa triển khai Airflow, Metabase, AI, SCD2, retention, RFM scoring, balances, holdings hoặc P&L.
 - Chưa commit thay đổi 2B hoặc push. Dừng ở cuối 2B để user review.
+
+## Chặng 3 — Metabase dashboard, 2026-11-02
+
+### Grain và 116/180 ngày: kiểm chứng trước khi triển khai
+
+Đã đọc model SQL, columns thực tế và unique test của mart_daily_trading:
+columns dataset_id/trade_date/as_of_date/trade_count/active_customers/trade_volume_usd/fees_usd.
+**116 rows = 116 distinct(dataset_id,trade_date)**. Grain là dataset/ngày có trade,
+không có asset hoặc side. Docs/models.md và README đã đồng bộ với thực tế; unique
+key/test vẫn chính xác, không sửa model SQL hoặc dữ liệu.
+
+| Tháng | Ngày giá/calendar | Ngày có trade | Trades |
+| --- | ---: | ---: | ---: |
+| 2026-05 | 31 | 20 | 10500 |
+| 2026-06 | 30 | 22 | 9300 |
+| 2026-07 | 31 | 26 | 10100 |
+| 2026-08 | 31 | 23 | 9400 |
+| 2026-09 | 30 | 16 | 5900 |
+| 2026-10 tới ngày 27 | 27 | 9 | 4800 |
+| Tổng | 180 | 116 | 50000 |
+
+SQL theo customer/profile xác nhận: 100 never có 0 trades, 100 regular có 55 trades,
+500 regular có 56, 300 ceased có 55. Regular spacing từng khách là 3/4 ngày:
+24.200 gaps 3 ngày và 8.700 gaps 4 ngày. Ceased spacing 2/3 ngày: 12.900 gaps 2 ngày,
+3.300 gaps 3 ngày, trade cuối 2026-08-28. Regular có union 91 ngày, ceased 55,
+intersection xác nhận bằng INTERSECT là 30 → union 116, còn 64 ngày zero-trade.
+Lịch trong cùng cohort được đồng bộ bởi generator; regular không có nghĩa daily
+activity hoặc independent calendars. Không sửa input để làm đẹp phân bố.
+
+### Git và services
+
+Đã review diff/staged, so candidate content với password local và kiểm tra artifacts;
+commit 2B thành **5993a26** (`Complete stage 2B: dbt analytics and isolated reconciliation tests`).
+Không tạo commit rỗng, không push. Ảnh và code chặng 3 hiện để working tree cho review.
+
+`uname -m` = arm64. Manifest image metabase/metabase:v0.64.1 có linux/arm64;
+Docker image chạy native arm64. Thêm hai services vào compose.yaml:
+
+- metabase: loopback 127.0.0.1:3000, healthcheck /api/health.
+- metabase_db: PostgreSQL riêng lưu metadata vào named volume de_pj_metabase_metadata,
+  không publish host port. MB_DB_TYPE=postgres; không dùng H2.
+
+Các service/cổng cũ giữ nguyên: business PostgreSQL 55432, test PostgreSQL 55433,
+my-postgres 5432, my-pgadmin 8080. Không xóa/reset volume hoặc dữ liệu business.
+METABASE_DB_PASSWORD, reader/admin passwords và encryption key mới chỉ ở .env mode 0600.
+init_metabase_env.py đã chạy: 0 values bị rotate/ghi đè khi env đã đầy đủ.
+
+### Read-only connection và dashboard provisioning
+
+Tạo metabase_reader có LOGIN, không SUPERUSER/CREATEDB/CREATEROLE/REPLICATION,
+không role memberships/ownership của business tables; chỉ analytics USAGE/SELECT,
+default_transaction_read_only=on và statement timeout 30s. Default privileges cấp
+SELECT cho analytics tables/views mới do cùng owner tạo. Tài khoản owner/dev chỉ
+chạy setup grants; **Metabase data source connection user=metabase_reader**.
+
+Đã thực thi SELECT bằng reader và thử UPDATE analytics.fact_trades WHERE false
+sau SET LOCAL transaction_read_only=off: **InsufficientPrivilege**, chứng minh ACL
+ngăn ghi, không chỉ dựa vào transaction default. Direct raw.price_fetches SELECT
+cũng bị từ chối. Không row business nào được sửa bởi kiểm tra này.
+
+Qua API local v0.64.1 đã bootstrap admin, cấu hình report timezone UTC, collection,
+read-only database connection, 9 SQL questions và một project dashboard:
+
+- Dashboard ID 2, collection 5, analytics data source ID 2.
+- Cards 40..48, SQL được version ở metabase/cards/.
+- URL máy này: http://localhost:3000/dashboard/2.
+- Rerun setup giữ cùng dashboard/card IDs, không nhân đôi project dashboard.
+- Nhãn: synthetic customers/executions, Coinbase daily-close reference,
+  portfolio-v1, cutoff 2026-10-27 UTC, trade volume không phải revenue.
+
+Date from/to và asset chỉ map vào 7 trading cards. Hai customer snapshot cards có
+zero parameter mappings và không có native template tags; không giả vờ tái tính
+snapshot theo các filters. Asset/side breakdown query fact, không đổi grain mart.
+Daily volume/fees dùng dim_date + filtered fact LEFT JOIN: 180 rows, 64 zero-trade days.
+
+### Đối soát cards thật với PostgreSQL SQL độc lập
+
+scripts/verify_metabase.py gọi POST card/query trên các saved cards, so với bound SQL
+độc lập bằng reader connection. Đã chạy thành công trước **và sau** restart:
+
+| Trade scope | Count | Volume USD | Fees USD | Distinct active customers | Calendar / zero days |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Default 2026-05-01..2026-10-27 | 50000 | 615063969.51 | 615063.60 | 900 | 180 / 64 |
+| June 1..30 | 9300 | 100591957.72 | 100591.72 | 900 | 30 / 8 |
+| ETH toàn kỳ | 16667 | 17344749.48 | 17345.27 | 300 | 180 / 64 |
+| June + ETH | 3100 | 2633325.78 | 2633.37 | 300 | 30 / 8 |
+
+So từng daily date/volume/fees, tổng asset/side, snapshot segment counts và top 15
+customer fees đều khớp SQL. Segments: active=600, inactive=300, never_traded=100.
+Global distinct lấy từ fact trong đúng scope, không SUM daily distinct. SQL thuần
+sql/verify_3.sql cũng đã chạy qua psql ON_ERROR_STOP=1 và khớp các con số trên.
+Không gọi API giá mới, không tạo fixture hoặc sinh lại trades ở chặng 3.
+
+### Persistence và UI đã thực hiện
+
+Đã lưu snapshot dashboard ID, card IDs, toàn bộ SQL queries/template tags, filters và
+visualization settings; chạy docker compose restart metabase, đợi healthy và login lại.
+Snapshot trước/sau **bằng nhau**. Đã query lại tất cả cases, vẫn pass. Metadata PostgreSQL
+và volume tồn tại độc lập với app; chưa thử restart metadata DB hoặc backup/restore.
+
+Thao tác UI thật trong in-app browser:
+
+1. Mở localhost:3000, đăng nhập admin local từ .env; bỏ chọn Remember me, không lưu password.
+2. Mở dashboard 2, đọc KPI mặc định 615063969.51 / 615063.60 / 50000 / 900.
+3. Mở Asset dropdown, chọn ETH và Add filter; UI ra 16667 trades và 300 customers.
+4. Dùng date pickers đổi From=2026-06-01, To=2026-06-30, giữ ETH;
+   UI ra 2633325.78 / 2633.37 / 3100 / 300, khớp independent SQL.
+5. Customer segment chart và top-fee table vẫn giữ fixed snapshot; nhãn đã ghi rõ.
+6. Sau restart mở lại default URL, kiểm tra số mặc định và lưu ảnh thật, giữ tab mở.
+
+Ảnh chụp JPG nguyên từ UI, không tạo mock hay ảnh ghép:
+
+- docs/screenshots/metabase-default-kpis.jpg — volume/fees mặc định.
+- docs/screenshots/metabase-default-counts.jpg — 50000 trades/900 customers.
+- docs/screenshots/metabase-june-eth.jpg — UI June+ETH volume/fees và filter values.
+
+Viewport in-app browser hẹp, ảnh chỉ chụp phần đang thấy, không phải toàn dashboard
+ở desktop. Full-page screenshot ban đầu không bao hết nested scroll container;
+đã cuộn thật tới KPI rồi chụp lại. Không resize hoặc dựng lại chart để giả screenshot.
+Thử native Chrome qua UI automation bị timeout; không coi đó là Chrome UI đã pass.
+Trên Mac user chỉ cần mở URL bằng Chrome/Safari, login từ .env để review bố cục rộng;
+không cần tự tạo cards/dashboard hoặc nối filters.
+
+Logs/report IDs/persistence snapshots nằm trong ignored data/metabase-*.json/log.
+Local OpenAPI được đọc từ container để xác minh endpoint payload; ví dụ v0.64 yêu cầu
+parameter ID trong card/query đã được xử lý, sau đó tất cả cases pass.
+
+Rà soát cuối: market business checksum và full customer/trade snapshots vẫn bằng
+các snapshot 2A; reader không có role memberships/table ownership hoặc elevated flags.
+Candidate-file scan kiểm tra mọi local password/encryption key, không phát hiện secrets
+hoặc local artifacts; staged area rỗng. Compose config và Python compile checks pass.
+Screenshot KPI mặc định có SHA-256
+`b1ffc16481c2245ed60468c1908e0cd4ec57b501edfbc42ff74b32f6cbd3c414`,
+khớp nguyên bytes screenshot đã emit từ UI và file trong repo; cả ba JPG đã đọc lại
+để xác nhận đúng nội dung KPI, không chỉ dựa vào tên file.
+
+### Phần chưa chạy / giới hạn
+
+- Chưa kiểm tra Chrome desktop/Safari, chia sẻ public, HTTPS/reverse proxy hoặc deploy ngoài Mac local.
+- Chưa thử metadata PostgreSQL restart, backup/restore, volume migration hoặc mất encryption key.
+- Chưa thử fresh full pipeline + Metabase từ một clone trống; đã tạo mới metadata DB,
+  bootstrap app, rerun provisioning và kiểm chứng trên analytics hiện có.
+- Không tự refresh dbt snapshot khi thay date filters; customer cards luôn cutoff cố định.
+- Chưa có CI/Airflow/AI/RFM/retention. Không bật public sharing hoặc cấu hình SMTP.
+- Chưa commit chặng 3 hoặc push. Dừng ở cuối chặng 3 để review.
+
+### Rà soát trước commit chặng 3 — 2026-11-02
+
+Theo yêu cầu commit sau review: đã xem diff và các file mới, kiểm tra 76 candidate
+files với secrets local mà không in giá trị; không phát hiện secrets, private key
+hoặc artifacts bị cấm. `docker compose config --quiet`, Python AST parse của các
+scripts Metabase và `git diff --check` đều pass. Không chạy lại các integration
+checks ở phần trên trong lần commit này. Hai ảnh PNG bổ sung trong screenshots
+đã được xem: là dashboard desktop do user cung cấp, không phải kiểm thử Chrome
+mới do agent thực hiện. Commit chặng 3 local; không push remote.
