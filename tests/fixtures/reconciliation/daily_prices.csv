@@ -1,0 +1,7 @@
+source,product_id,price_date,close_price
+fixture,BTC-USD,2026-05-01,100.00
+fixture,ETH-USD,2026-05-01,20.00
+fixture,SOL-USD,2026-05-02,10.00
+fixture,BTC-USD,2026-05-02,110.00
+fixture,ETH-USD,2026-05-03,25.00
+fixture,SOL-USD,2026-05-03,12.00

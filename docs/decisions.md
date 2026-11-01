@@ -1,4 +1,7 @@
-# Quyết định chặng 1
+# Quyết định theo chặng
+
+Phần chặng 1 bên dưới là lịch sử; quyết định chặng 2A ở cuối tài liệu thay thế
+các giới hạn cũ về BTC-only, window đơn và tên volume.
 
 ## 2026-11-01 — Phạm vi
 
@@ -65,3 +68,77 @@ Nếu Retry-After dài hơn budget thì dừng. Không có disk spool khi databa
 không có scheduler tự chạy, chưa có run-status table hoặc alerting.
 
 Các quyết định trên phục vụ learning scope chặng 1; chưa tuyên bố production-ready.
+
+## 2026-11-01 — Chặng 2A: multi-asset và synthetic
+
+Chặng 1 đã có commit `4153807` trước khi sửa chặng 2A; working tree/staged trống.
+Đã đọc code/docs và xác nhận tracked files không chứa .env, venv, data local hay
+mật khẩu local. Không tạo commit rỗng và không push. Cập nhật AGENTS theo scope mới.
+
+### Coinbase và lịch sử theo product
+
+Giữ provider. Probe `/products/BTC-USD`, `/products/ETH-USD`, `/products/SOL-USD`
+đều HTTP 200, base đúng BTC/ETH/SOL, quote USD, status online, trading_disabled=false.
+Probe daily candles vượt 300 ngày thực tế trả HTTP 400 với thông báo count of
+aggregations exceeds 300. Không thử tải sát quota theo IP hoặc cố tình tạo 429.
+Tài liệu candles và rate limit dẫn ở phần chặng 1 vẫn là nguồn tham chiếu.
+
+Chọn range cố định `[2026-05-01,2026-10-28)` = 180 completed UTC days. Chia 3
+windows 60 ngày: May 1→Jun 30, Jun 30→Aug 29, Aug 29→Oct 28, cho mỗi product.
+Trần window 299 ngày chừa một inclusive-end candle; total range không còn bị
+giới hạn bởi một request. Request tuần tự có pacing 1s mặc định.
+Lọc `[start,end)` trên từng response, check completeness từng product/window.
+Chỉ commit normalized toàn run khi mọi window đạt; raw attempts commit riêng.
+Không fill missing hoặc suy đoán lịch sử product. Coverage chỉ được xác nhận cho
+range thực tế đã lấy, không tuyên bố lịch sử đầy đủ trước đó.
+
+### Migrations và preservation
+
+Giữ nguyên `001_schema.sql` đã commit. Migration `002` mở product CHECK, rename
+volume_btc→volume_base, giữ values/keys/FK/raw của chặng 1 và thêm schema synthetic.
+`init_db` ghi migration filenames, dùng transaction/advisory lock và skip migration
+đã chạy. Không drop bảng, xóa row hay reset volume.
+
+### Synthetic contracts
+
+Không sinh CSV 50k rồi gọi là dữ liệu thị trường. Load vào `synthetic.datasets`,
+`synthetic.customers`, `synthetic.trades`; origin synthetic, status MATCHED.
+Grain customer là một người giả, PK UUID5. Grain trade là một matched execution,
+PK UUID5. Thêm unique (dataset_id,entity_number) và FK dataset/customer/price/raw.
+
+Generator version `synthetic-v1`, dataset `portfolio-v1`, seed `20261101`, cùng
+range 180 ngày. IDs dùng namespace UUID5 từ version/dataset_id và entity number;
+seed không nằm trong ID để giữ logical ID khi rerun, nhưng dataset registry từ
+chối seed/config/price inputs khác dưới cùng dataset_id.
+RNG Python random.Random, không dùng cho bảo mật. Reproducibility đã kiểm chứng
+trên Python 3.13.5; chưa xác minh mọi phiên bản Python tương lai.
+
+Created_at của tất cả khách trước start 1..30 ngày. 100 never, 600 regular,
+300 ceased. 50k trades chia vòng qua 900 khách; mỗi khách 55/56 executions.
+Regular trải đều toàn range, ceased chỉ trong 120 ngày đầu và im lặng 60 ngày cuối.
+BUY/SELL luân phiên theo trade ordinal của khách. Product chia vòng BTC/ETH/SOL;
+vì 900 chia hết cho 3, ở version này mỗi khách hoạt động gắn với một product.
+Đây là kịch bản để phân tích, chưa mô phỏng danh mục đa tài sản cho từng khách.
+
+Quantity 6 decimal places, random integer 1000..1000000 / 1000000. Execution
+dựa daily close × (1+slippage bps/10000), slippage integer [-25,25], round 2 decimals
+HALF_UP. Notional = quantity × execution rồi round 2; fee = notional × 0.001
+rồi round 2 mỗi execution. SQL constraints dùng round NUMERIC tương ứng cho số dương.
+
+Intraday timestamps với close cùng ngày là look-ahead: chỉ để tạo synthetic,
+không dùng cho backtesting hoặc mô tả lệnh thị trường thật. Không có funds/holdings,
+bán không cần sở hữu asset; không tính balance hoặc P&L.
+
+Giữ reference_close và reference_fetch_id của lần sinh; lưu checksum business
+prices, không gồm fetch metadata. Giá live thay đổi thì reject rerun cùng dataset,
+không tự reprice lịch sử synthetic. Input price không đổi nhưng fetch ID mới thì
+cho rerun, giữ raw lineage ban đầu. Synthetic INSERT ON CONFLICT DO NOTHING,
+đối chiếu full business checksum/counts trước commit để phát hiện dữ liệu bị sửa.
+
+### Fixture nhỏ và scope tiếp theo
+
+Fixture tách ở tests/fixtures/reconciliation: source=fixture, 4 customers/6 trades,
+giá giả rõ ràng, expected totals viết độc lập. Không có command nạp fixture vào live;
+source CHECK cũng ngăn ghi fixture trực tiếp. Mẫu gồm zero-trade customer, cả BUY/SELL,
+fee half-cent và notional half-cent để chặng 2B có oracle kiểm thử.
+Chưa thêm dbt, Airflow, Metabase, CI, analytics models, balances, holdings hoặc P&L.

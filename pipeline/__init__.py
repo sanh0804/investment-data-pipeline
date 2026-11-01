@@ -1,1 +1,1 @@
-"""Stage 1: collect BTC-USD daily candles into PostgreSQL."""
+"""Coinbase daily prices and clearly separated synthetic portfolio datasets."""

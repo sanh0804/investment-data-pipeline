@@ -45,3 +45,40 @@ API public → `collector.fetch()` lưu từng HTTP attempt vào `raw.price_fetc
   vào bảng live hay dùng làm bằng chứng lấy dữ liệu thật.
 - Volume PostgreSQL và `.env` là trạng thái local cần giữ khi rerun.
 - Xem `verification.md` để biết kết quả nào là thực nghiệm và giới hạn nào còn mở.
+
+## Chặng 2A — luồng và file mới
+
+Collector lặp product → date_windows → raw → validate tất cả → một upsert transaction.
+`sql/002_multi_asset_synthetic.sql` nâng cấp schema đã có bằng migration, không reset.
+`pipeline/synthetic.py` đọc daily prices, tạo dataset registry, customers trước trades.
+`pipeline/verify_stage2a.py` chỉ đọc để kiểm tra constraints, profiles, tiền và checksum.
+Fixture CSV + expected_totals.json chỉ được unit tests đọc, chưa phải dbt models.
+
+### Ba kiến thức cần hiểu
+
+1. **Pagination theo thời gian và completeness theo từng asset.** Product tồn tại
+   không đồng nghĩa có đủ lịch sử. Chia windows dưới trần API; dùng `[start,end)`
+   để biên chung không bị nhân đôi, kiểm tra từng ngày trước khi commit toàn batch.
+2. **Deterministic synthetic data và lineage.** Seed + version + fixed date range
+   giữ values tái lập, UUID5 giữ entity IDs ổn định. Dataset registry đóng băng
+   config và price-input hash. Source live cho reference price không biến synthetic
+   execution thành trade thật; phải ghi rõ daily-close look-ahead assumption.
+3. **Decimal, rounding per trade và reconciliation oracle.** Làm tròn price trước,
+   rồi quantity×price, rồi fee theo notional đã round. SUM các row đã round có thể
+   khác round một lần ở tổng. Fixture nhỏ phải có expected totals tính tay độc lập,
+   không chỉ so hai hàm thực hiện cùng một công thức.
+
+### Ba câu hỏi phỏng vấn
+
+1. Nếu một window của SOL thiếu ngày trong khi BTC đã lấy xong thì pipeline làm gì?
+   Giữ raw, báo product/window bị thiếu, không commit normalized của cả run; không
+   tự điền giá. Có thể rerun sau khi điều tra, upsert không nhân đôi các key đã có.
+2. Cùng seed có đủ để bảo đảm 50k trades giống nhau khi chạy lại không?
+   Còn phụ thuộc fixed dates, input-price snapshot, generator version, traversal
+   order, rounding và runtime. Registry/checksum phát hiện drift, IDs/FK bảo vệ grain.
+3. Tại sao tổng phí không nên tính bằng SUM(notional)×fee_rate rồi round một lần?
+   Fee thực hiện per trade; rounding error tích lũy làm khác. Đối chiếu từng row,
+   rồi tổng theo customer/product/side/date với fixture độc lập để bắt lỗi join/rounding.
+
+Không cộng quantity của BTC/ETH/SOL thành một tổng vì khác đơn vị. Notional USD và
+fee USD có thể cộng; đó là tổng hoạt động giao dịch, không phải vốn, balance hay P&L.

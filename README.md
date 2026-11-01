@@ -1,16 +1,16 @@
 # Investment Data Pipeline & Analytics
 
-Personal portfolio project cho vị trí Data Engineering / Data Analytics.
-Chặng 1: lấy daily candle BTC-USD từ Coinbase Exchange, lưu raw và giá đóng cửa theo ngày UTC vào PostgreSQL.
+Personal portfolio project cho Data Engineering / Data Analytics.
+Hiện hoàn thành chặng 1 và 2A: giá ngày BTC/ETH/SOL thật từ Coinbase Exchange,
+1.000 khách hàng và 50.000 giao dịch đã khớp **hoàn toàn synthetic**.
 
-Stack toàn project đã chốt: Python, PostgreSQL, dbt Core, Airflow, Metabase,
-Docker Compose và GitHub Actions. Các chặng sau mới có ETH/SOL, 1.000 khách hàng
-và 50.000 giao dịch đã khớp giả lập, SQL transformations, data quality,
-reconciliation, customer summary và một dashboard. Airflow và CI thêm cuối cùng.
+Stack đã chốt: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose,
+GitHub Actions. Chưa dựng dbt, Airflow, Metabase hay CI; dừng sau 2A để review.
+Không mô phỏng số dư, holdings, P&L, SCD2 hay retention.
 
-## Yêu cầu và setup trên macOS
+## Setup macOS
 
-Kiểm tra thực tế trước khi cài, không chọn architecture cố định cho Docker:
+Kiểm tra architecture và công cụ trước, không mặc định Intel/Apple Silicon:
 
 ```bash
 uname -m
@@ -21,8 +21,8 @@ docker info --format '{{.OSType}} {{.Architecture}}'
 git --version
 ```
 
-Python đã kiểm chứng: 3.13.5; cần Python >= 3.11 và Docker daemon hoạt động.
-Chạy các lệnh tại thư mục gốc repository:
+Đã chạy trên macOS arm64, Python 3.13.5, Docker Linux aarch64. Cần Python >=3.11.
+Chạy các lệnh từ repository root:
 
 ```bash
 python3 -m venv .venv
@@ -31,142 +31,193 @@ cp -n .env.example .env
 chmod 600 .env
 ```
 
-Sửa `POSTGRES_PASSWORD` trong `.env` thành mật khẩu local ngẫu nhiên trước khi
-khởi tạo database. Có thể tạo bằng `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
-Nếu `.env` đã được tạo trong lần triển khai đầu thì giữ nguyên mật khẩu đang dùng.
-Không commit file này. Không cần API key cho endpoint đã chọn.
+Nếu tạo `.env` mới, thay placeholder `POSTGRES_PASSWORD` bằng mật khẩu local
+ngẫu nhiên trước khi chạy database. Có thể tạo bằng:
+`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
+Giữ nguyên password nếu dùng database chặng 1; sửa env không tự đổi password
+trong volume đã có. Không commit `.env`. API đã chọn không dùng API key.
 
 ```bash
 docker compose up -d --wait
-docker compose ps
 .venv/bin/python -m pipeline.init_db
+```
+
+PostgreSQL bind `127.0.0.1:55432`, có healthcheck và volume riêng. Không đụng
+PostgreSQL khác ở 5432. Nếu host port bận, đổi `POSTGRES_PORT` trong `.env`.
+`init_db` chạy các migration `sql/NNN_*.sql` theo thứ tự và ghi vào
+`public.schema_migrations`, toàn bộ trong transaction, có advisory lock.
+Chạy lại không xóa bảng/volume. Chặng 2A giữ toàn bộ dữ liệu chặng 1, mở whitelist
+product và đổi tên `volume_btc` thành `volume_base` (BTC/ETH/SOL tương ứng).
+Không sửa nội dung migration đã áp dụng; thêm migration mới khi đổi schema.
+
+## Thu thập 180 ngày giá live
+
+Khoảng kiểm chứng cố định: **[2026-05-01, 2026-10-28) UTC**, gồm đúng 180 ngày.
+Dùng explicit environment để không vô tình lấy khoảng 3 ngày từ `.env` chặng 1:
+
+```bash
+START_DATE=2026-05-01 END_DATE=2026-10-28 \
+PRODUCTS=BTC-USD,ETH-USD,SOL-USD REQUEST_CHUNK_DAYS=60 \
 .venv/bin/python -m pipeline.collector
 ```
 
-PostgreSQL chỉ bind `127.0.0.1:55432`, dùng volume `postgres_data` của Compose project này.
-Host đã có database ở 5432; không sửa service đó. Nếu 55432 bận, đổi `POSTGRES_PORT`
-trong `.env`. Schema được tạo bằng lệnh Python riêng, có thể chạy lại; không phụ
-thuộc script chỉ chạy lần đầu của PostgreSQL image.
+Chạy cùng lệnh lần nữa để kiểm tra rerun. Dự kiến 540 normalized rows nếu API có
+đủ lịch sử; chương trình không giả định điều đó chỉ vì product tồn tại.
+Nếu bỏ cả START_DATE/END_DATE trong env và `.env`, mặc định 180 ngày UTC hoàn tất
+gần nhất. Chỉ đặt một trong hai biến là lỗi. Shell environment ưu tiên `.env`.
 
-## Cấu hình và dữ liệu
+Nguồn: [Coinbase product candles](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles).
+Giá là daily close trên sàn Coinbase, quote USD, không phải market-wide average.
+Cả ba product đã trả HTTP 200 và có đủ lịch sử **trong khoảng đã kiểm chứng**;
+không suy ra mọi mốc cũ hơn đều được hỗ trợ.
 
-`.env.example` minh họa `START_DATE=2026-10-25`, `END_DATE=2026-10-28`:
-ba ngày 25, 26, 27/10 UTC. `start` bao gồm, `end` loại trừ. Nếu bỏ cả hai biến,
-collector lấy 7 ngày UTC đã hoàn tất gần nhất. Chỉ đặt một biến sẽ báo lỗi.
-Shell environment ưu tiên hơn `.env`.
+- `granularity=86400`; API time là đầu bucket, integer epoch seconds, UTC midnight.
+- API có thể trả ngày ở end hoặc trước start, thứ tự giảm dần. Client lọc `[start,end)`,
+  sắp xếp, từ chối duplicate/missing day hoặc bucket không phải UTC midnight.
+- Mỗi window mặc định 60 ngày; các biên chung không tạo duplicate vì end-exclusive.
+  Tối đa 299 ngày/window để chừa một inclusive-end candle trong mức 300 nến nguồn.
+  Client cho phép tổng range 1..3650 ngày, tách request; không bảo đảm lịch sử sẵn có.
+- Tất cả product/window phải qua validation trước khi commit **một normalized batch**.
+  Bất kỳ window thiếu ngày thì không ghi normalized của toàn bộ run. Các raw attempts
+  đã commit vẫn còn. Không nội suy hoặc dùng fixture để điền thiếu.
+- `HTTP_REQUEST_INTERVAL` mặc định 1 giây, tối thiểu 0.2 giây, giữa các request.
+  [Giới hạn public theo tài liệu](https://docs.cdp.coinbase.com/exchange/rest-api/rate-limits):
+  10 req/s/IP, burst 15; không flood để thử quota. Probe vượt 300 nến thực tế trả 400.
+- Connect/read timeout mặc định 5s/20s; read timeout là socket inactivity, không phải
+  deadline toàn run. Tối đa 3 attempts/request (hard cap 5). Retry timeout, connection
+  error, 408/429/500/502/503/504; không retry TLS certificate errors hoặc permanent 4xx.
+  Exponential backoff, đọc Retry-After; nếu delay vượt budget thì dừng để chạy lại sau.
 
-```bash
-START_DATE=2026-10-25 END_DATE=2026-10-28 .venv/bin/python -m pipeline.collector
-```
-
-Tối đa 299 ngày/request; vượt giới hạn sẽ báo lỗi, chưa có pagination/backfill dài.
-`END_DATE` không được vượt ngày hiện tại UTC. Không thu thập nến ngày đang mở.
-Source cố định `coinbase_exchange`, product `BTC-USD` trong chặng 1.
-Giá là daily close bằng USD tại Coinbase, không phải giá trung bình toàn thị trường.
-
-Các biến timeout/retry và kết nối nằm trong `.env.example`.
-Mỗi request có connect timeout và read timeout riêng (mặc định 5s/20s).
-Read timeout là thời gian chờ đọc socket, không phải deadline cho toàn bộ run.
-Mặc định tối đa 3 attempts kể cả lần đầu, hard cap 5; exponential backoff.
-Chỉ retry timeout, connection error và HTTP 408/429/500/502/503/504.
-Không retry lỗi chứng chỉ TLS, 400/401/403/404 hoặc JSON/data validation.
-`Retry-After` được đọc dưới dạng số giây hoặc HTTP date; nếu thời gian chờ vượt
-`HTTP_MAX_RETRY_DELAY`, dừng để chạy lại sau, không gọi API sớm hơn yêu cầu.
-
-Luồng dữ liệu:
+## Raw, grain và upsert
 
 ```text
-Coinbase public candles API (BTC-USD, 86400s)
-  → raw.price_fetches (commit từng attempt, giữ body bytes + metadata)
-  → parse JSON bằng Decimal, kiểm tra UTC/OHLC/completeness
-  → market.daily_prices (một transaction upsert cho cả khoảng ngày)
+Coinbase daily candles (live)
+  → raw.price_fetches (commit mỗi HTTP attempt; body bytes + SHA-256 + metadata)
+  → kiểm tra UTC, shape, completeness, Decimal và OHLC
+  → market.daily_prices (transaction cho toàn bộ run, upsert source/product/day)
+  → synthetic generator đọc snapshot daily closes
+  → synthetic.datasets → synthetic.customers → synthetic.trades
+
+Fixture riêng: tests/fixtures/reconciliation → unit tests; không có loader vào DB live
 ```
 
-`raw.price_fetches` giữ response body nguyên bytes đã được HTTP client giải nén,
-SHA-256, thời điểm bắt đầu/kết thúc UTC, endpoint, params, HTTP status, run ID,
-attempt number và một số response headers. Không lưu cookie/authorization.
-Transport error không có HTTP response thì body/status là NULL.
-JSON lỗi vẫn được lưu raw. Nếu database không kết nối/ghi được thì dừng; chưa có
-fallback spool trên disk. `raw` là quy ước append-only của ứng dụng, chưa cưỡng chế
-bằng role riêng; tài khoản database hiện chỉ phục vụ local development.
+Raw grain: một HTTP attempt, PK `fetch_id`, unique `(run_id,attempt_number)`.
+`run_id` nhóm retries **của một request/window**, không phải cả collector invocation.
+Raw lưu endpoint/product/params, start/fetched time UTC, HTTP status, body nguyên
+bytes sau HTTP decompression, SHA-256, transport error và headers allowlist.
+Không lưu authorization/cookie. Transport failure có body/status NULL.
+Nếu JSON/data validation lỗi, raw vẫn tồn tại; nếu database down thì dừng,
+chưa có disk spool. Raw là quy ước append-only trong ứng dụng, chưa phân role riêng.
 
-`market.daily_prices` có grain **một source × product × ngày UTC đã hoàn tất**.
-Primary/unique key: `(source, product_id, price_date)`.
-`bucket_start` phải bằng 00:00:00 UTC của `price_date`.
-Giá dùng `Decimal` → PostgreSQL `NUMERIC`, không qua binary float.
-`ON CONFLICT DO UPDATE` cập nhật OHLCV và lineage nếu fetch sau sửa dữ liệu lịch sử.
-Chính sách hiện tại là lần xử lý được commit sau cùng thắng; chạy collector tuần tự.
-Không giữ lịch sử phiên bản normalized; raw giữ được từng response.
-`loaded_at`/`last_fetch_id` là metadata xử lý, có thể đổi khi chạy lại; idempotency
-được định nghĩa theo key và business values, không phải toàn bộ metadata.
+Giá chuẩn hóa grain/key: **(source, product_id, price_date UTC)**.
+`bucket_start` = 00:00 UTC của ngày đã hoàn tất. `ON CONFLICT DO UPDATE` cập nhật
+OHLCV và lineage; lần xử lý commit sau cùng thắng. Chạy collector tuần tự.
+`Decimal` → `NUMERIC` giữ precision; `volume_base` theo base asset.
+`last_fetch_id` và `loaded_at` có thể đổi khi rerun; idempotency giá đo bằng key và
+business values. Raw giữ response history, normalized không giữ version history.
 
-Collector không giả định API sắp xếp tăng dần hay tuân thủ end-exclusive.
-Timestamp phải là integer epoch seconds tại nửa đêm UTC. Lọc `[start, end)`,
-sắp xếp tăng dần, từ chối duplicate day, thiếu ngày, giá không hợp lệ hoặc OHLC
-không nhất quán. Thiếu ngày khiến toàn bộ normalized batch không được ghi;
-không nội suy, không tự thêm fixture. Raw attempt vẫn còn để điều tra.
+## Synthetic customers và matched trades
 
-## Kiểm tra kết quả và idempotency
+Chỉ chạy sau khi có đủ 540 giá live cho khoảng cố định:
+
+```bash
+.venv/bin/python -m pipeline.synthetic \
+  --dataset-id portfolio-v1 --seed 20261101 --start 2026-05-01 --end 2026-10-28
+```
+
+Chạy lại cùng lệnh để kiểm chứng. Không có API trade thật trong dataset này.
+Toàn bộ dữ liệu sinh nằm trong schema **synthetic**, tách khỏi raw/market.
+
+- 1.000 customers: 100 `never`, 600 `regular`, 300 `ceased`. Created_at nằm 1..30
+  ngày trước start; customers được INSERT trước trades, trong cùng transaction.
+- 50.000 trades trạng thái `MATCHED`, BUY/SELL, chia vòng qua 900 customers hoạt động.
+  Mỗi khách hoạt động có 55/56 trades; regular trải đều từ ngày đầu đến ngày cuối
+  (cách nhau tối đa 4 ngày ở bộ 180 ngày), ceased chỉ giao dịch 120 ngày đầu và
+  không giao dịch 60 ngày cuối. Profile là kịch bản sinh dữ liệu, chưa phải churn model.
+- UUID5 từ generator version + dataset_id + entity number; cùng dataset thì IDs ổn định.
+  RNG seed cố định quyết định timestamps, quantity, slippage và created_at.
+- Quantity 0.001000..1.000000 base asset, scale 6. Reference là daily close live của
+  product/ngày đó. Slippage nguyên -25..25 bps. Tất cả tính bằng Decimal:
+
+```text
+execution_price = round_half_up(reference_close × (1 + slippage_bps / 10000), 2)
+notional_usd    = round_half_up(quantity × execution_price, 2)
+fee_usd         = round_half_up(notional_usd × 0.001, 2)   # 10 bps, round từng trade
+```
+
+**Giả định:** timestamp intraday nhưng execution dựa trên close cùng ngày, có
+look-ahead nếu dùng cho backtest. Chỉ để tạo dữ liệu synthetic; không mô tả đây là
+lịch sử khớp lệnh thực hay dùng đánh giá chiến lược. Không kiểm tra khả năng bán,
+không mô hình hóa funds/inventory, không tính số dư, holdings hay P&L.
+
+`synthetic.datasets` lưu seed/range/version, checksum price inputs và business data.
+Rerun dùng INSERT ON CONFLICT DO NOTHING và đối chiếu toàn bộ business checksum.
+Nếu cùng dataset_id nhưng seed/date/price snapshot/content thay đổi, báo lỗi;
+không tự ghi đè. Dùng dataset_id mới khi chủ đích tạo bộ khác. Giá live cập nhật
+lineage mà close không đổi vẫn cho phép rerun; reference_fetch_id gốc trong trade
+được giữ để truy nguyên. Không tự refresh synthetic theo giá lịch sử đã sửa.
+
+FK ràng buộc dataset/customer, market price key và raw fetch provenance; check
+constraints ràng buộc side, status, số dương và các công thức tiền. Customer-time
+ordering và cohort behavior được kiểm tra ở bước verification, chưa có trigger.
+
+## Kiểm chứng và fixture cho chặng 2B
 
 ```bash
 .venv/bin/python -m pytest -q
-docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify.sql
+.venv/bin/python -m pipeline.verify_stage2a --dataset-id portfolio-v1
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_2a.sql
 ```
 
-SQL xem giá và kiểm tra duplicate:
+Verifier đọc dữ liệu, không ghi; xác minh coverage từng product, checksum synthetic,
+counts, FK, thời gian customer/trade, profiles, công thức giá/notional/phí và raw lineage.
+`sql/verify_2a.sql` có literals cho khoảng kiểm chứng và dataset_id mặc định, trả
+các counters cần bằng 0 cùng totals. SQL minh họa nhanh:
 
 ```sql
-SELECT price_date, bucket_start, close_price, last_fetch_id
-FROM market.daily_prices ORDER BY price_date;
-
-SELECT source, product_id, price_date, count(*)
+SELECT product_id, count(*), min(price_date), max(price_date)
 FROM market.daily_prices
-GROUP BY source, product_id, price_date HAVING count(*) > 1;
+WHERE price_date >= '2026-05-01' AND price_date < '2026-10-28'
+GROUP BY product_id;
+
+SELECT count(*), sum(notional_usd), sum(fee_usd)
+FROM synthetic.trades WHERE dataset_id = 'portfolio-v1';
 ```
 
-Collector in `fetch_id` cho mỗi attempt. Dùng ID của response HTTP 200 để phát lại
-**đúng cùng body đã lưu** hai lần, trong hai transaction đã commit:
+Replay **đúng body live đã lưu** hai lần (chọn fetch mới nhất của window/product):
 
 ```bash
-.venv/bin/python -m pipeline.verify_idempotency --fetch-id <UUID-cua-response-200>
+.venv/bin/python -m pipeline.verify_idempotency --fetch-id <UUID-response-200>
 ```
 
-Lệnh xác minh SHA-256, so sánh toàn bộ OHLCV theo key giữa hai lần, kiểm tra số
-dòng bằng số ngày kỳ vọng và báo JSON. Script ghi lại normalized từ response đã
-chọn, vì vậy chọn response mới nhất; đây là lệnh kiểm chứng thủ công, không phải
-scheduler. Raw không được tạo thêm khi replay. Chạy collector live hai lần là
-kiểm tra bổ sung; hai HTTP responses có thể khác nhau nên không thay thế replay.
+Replay có ghi upsert normalized; không thêm raw và không gọi API. Script so sánh
+count + OHLCV giữa hai transaction. Không replay fetch cũ đè phiên bản giá mới hơn.
+Bằng chứng hai collector runs và synthetic reruns: [docs/verification.md](docs/verification.md).
 
-Đọc raw JSON và params:
-
-```sql
-SELECT fetch_id, request_params, convert_from(response_body, 'UTF8') AS body
-FROM raw.price_fetches WHERE http_status = 200 ORDER BY fetched_at DESC LIMIT 1;
-```
-
-Trạng thái đã chạy/chưa chạy, ID và kết quả thực tế: [docs/verification.md](docs/verification.md).
-Unit tests dùng giá giả và HTTP mocks; không đại diện cho API live.
+Bộ nhỏ [tests/fixtures/reconciliation](tests/fixtures/reconciliation/README.md):
+4 customers, 6 trades, giá hoàn toàn giả, **475.94 USD notional và 0.48 USD phí**.
+Có CSV riêng và expected totals viết rõ theo customer/product/side/date, gồm ca
+rounding 0.055 → 0.06 và 30.075 → 30.08. Source `fixture` không hợp lệ với live
+schema; unit tests chỉ đọc file. Chưa dựng dbt models hoặc reconciliation workflow.
 
 ## File chính và vận hành
 
 | File | Vai trò |
 | --- | --- |
-| `AGENTS.md` | Quy tắc cho agent và ranh giới chặng 1 |
-| `compose.yaml` | PostgreSQL, healthcheck, cổng local và persistent volume |
-| `pipeline/config.py` | Đọc env, kiểm tra khoảng ngày/giới hạn |
-| `pipeline/collector.py` | Request live, retry, raw metadata và điều phối load |
-| `pipeline/normalize.py` | Parse Decimal, UTC và quality checks |
-| `pipeline/db.py`, `pipeline/init_db.py` | Kết nối, upsert và khởi tạo schema |
-| `pipeline/verify_idempotency.py` | Replay cùng raw response hai lần |
-| `sql/001_schema.sql`, `sql/verify.sql` | Grain/constraints và SQL kiểm chứng |
-| `docs/` | Kiến thức, quyết định và bằng chứng kiểm chứng |
+| `AGENTS.md` | Scope hiện tại và quy tắc làm việc |
+| `compose.yaml`, `.env.example` | PostgreSQL và cấu hình local |
+| `pipeline/config.py`, `collector.py` | Window, HTTP retry, raw và điều phối load |
+| `pipeline/normalize.py`, `db.py` | UTC/quality/Decimal và upsert |
+| `pipeline/init_db.py`, `sql/00*.sql` | Migrations không reset dữ liệu |
+| `pipeline/synthetic.py` | Generator, stable IDs và load synthetic |
+| `pipeline/verify_stage2a.py`, `verify_idempotency.py` | Verification, replay |
+| `sql/verify_2a.sql` | SQL kiểm tra coverage, FK, thời gian và totals |
+| `tests/fixtures/reconciliation/` | Dataset nhỏ và expected totals cho 2B |
+| `docs/` | Quyết định, kiến thức và bằng chứng đã chạy |
 
-Xem lỗi bằng `docker compose logs --tail=100 postgres` và `docker compose ps`.
-Dừng tạm bằng `docker compose stop`; khởi động lại bằng `docker compose up -d --wait`.
-Không xóa volume/data để sửa lỗi. Đổi `POSTGRES_PASSWORD` trong `.env` không tự đổi
-mật khẩu của database đã khởi tạo; cần thay đổi password trong PostgreSQL có chủ đích.
-Image `postgres:16-bookworm` khóa major version, chưa khóa digest;
-dependency Python khóa direct versions, chưa có transitive lockfile.
-
-Chưa triển khai dbt, Airflow, Metabase, CI, ETH/SOL, simulated customers/trades,
-AI agent, SCD2 hay retention. Dừng ở chặng 1 để review.
+Xem `docker compose ps`, `docker compose logs --tail=100 postgres` khi lỗi.
+Dừng bằng `docker compose stop`, khởi động lại bằng `docker compose up -d --wait`.
+Không xóa volume/data để sửa lỗi. Image khóa major `postgres:16-bookworm`, chưa pin
+image digest; Python khóa direct dependency versions, chưa có transitive lockfile.
+Chưa có scheduler, alerting, run-status table, production roles hoặc kiểm chứng concurrency
+cho collector. Các giới hạn/chưa chạy được ghi trong verification.

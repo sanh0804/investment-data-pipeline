@@ -9,7 +9,7 @@ from uuid import uuid4
 import requests
 from psycopg.types.json import Jsonb
 
-from pipeline.config import ENDPOINT, PRODUCT, SOURCE, load_settings
+from pipeline.config import PRODUCT, SOURCE, date_windows, endpoint, load_settings
 from pipeline.db import connect, upsert
 from pipeline.normalize import normalize
 
@@ -34,12 +34,14 @@ def retry_delay(header, attempt, settings):
     return max(0, delay)
 
 
-def fetch(conn, session, settings):
+def fetch(conn, session, settings, product=PRODUCT, start=None, end=None):
+    start, end = start or settings.start, end or settings.end
+    url = endpoint(product)
     run_id = uuid4()
     params = {
         "granularity": 86400,
-        "start": f"{settings.start.isoformat()}T00:00:00Z",
-        "end": f"{settings.end.isoformat()}T00:00:00Z",
+        "start": f"{start.isoformat()}T00:00:00Z",
+        "end": f"{end.isoformat()}T00:00:00Z",
     }
     for attempt in range(1, settings.max_attempts + 1):
         started = datetime.now(timezone.utc)
@@ -49,7 +51,7 @@ def fetch(conn, session, settings):
         transient = False
         try:
             response = session.get(
-                ENDPOINT, params=params,
+                url, params=params,
                 headers={"Accept": "application/json", "User-Agent": "investment-data-pipeline/0.1"},
                 timeout=(settings.connect_timeout, settings.read_timeout),
                 allow_redirects=False,
@@ -72,34 +74,51 @@ def fetch(conn, session, settings):
                      request_params, started_at, fetched_at, http_status,
                      response_headers, response_body, response_sha256, transport_error)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (fetch_id, run_id, attempt, SOURCE, PRODUCT, ENDPOINT, Jsonb(params),
+                (fetch_id, run_id, attempt, SOURCE, product, url, Jsonb(params),
                  started, fetched, status, Jsonb(headers), body,
                  hashlib.sha256(response.content).hexdigest() if response is not None else None, error),
             )
         print(json.dumps({"run_id": str(run_id), "fetch_id": str(fetch_id),
+                          "product": product, "start": str(start), "end": str(end),
                           "attempt": attempt, "http_status": status, "error": error}), flush=True)
         if status == 200:
             return fetch_id, body
         transient = transient or status in RETRY_STATUSES
         if not transient or attempt == settings.max_attempts:
             raise RuntimeError(f"Live API fetch failed: status={status}, error={error}; raw fetch_id={fetch_id}")
-        time.sleep(retry_delay(headers.get("retry-after"), attempt, settings))
+        time.sleep(max(settings.request_interval, retry_delay(headers.get("retry-after"), attempt, settings)))
     raise RuntimeError("No successful API response")
+
+
+def collect(conn, session, settings):
+    # autocommit ensures raw attempts persist independently of normalization.
+    conn.autocommit = True
+    batches = []
+    for product in settings.products:
+        for start, end in date_windows(settings.start, settings.end, settings.chunk_days):
+            if batches:
+                time.sleep(settings.request_interval)
+            fetch_id, body = fetch(conn, session, settings, product, start, end)
+            try:
+                candles = normalize(body, start, end)
+            except ValueError as exc:
+                raise ValueError(f"{product} [{start},{end}) fetch_id={fetch_id}: {exc}") from exc
+            batches.append((product, candles, fetch_id))
+    # All requested products/windows must pass before any normalized write.
+    with conn.transaction():
+        for product, candles, fetch_id in batches:
+            upsert(conn, candles, fetch_id, product)
+    return {"result": "live_collection_succeeded", "products": settings.products,
+            "normalized_rows": sum(len(c) for _, c, _ in batches),
+            "requests_succeeded": len(batches), "start": str(settings.start),
+            "end_exclusive": str(settings.end)}
 
 
 def main():
     try:
         settings = load_settings()
-        # autocommit ensures raw attempts persist independently of normalization.
         with connect() as conn, requests.Session() as session:
-            conn.autocommit = True
-            fetch_id, body = fetch(conn, session, settings)
-            candles = normalize(body, settings.start, settings.end)
-            with conn.transaction():
-                upsert(conn, candles, fetch_id)
-            print(json.dumps({"result": "live_collection_succeeded", "fetch_id": str(fetch_id),
-                              "normalized_days": len(candles), "start": str(settings.start),
-                              "end_exclusive": str(settings.end)}))
+            print(json.dumps(collect(conn, session, settings)))
     except Exception as exc:
         # Do not echo a connection DSN/password from arbitrary library exceptions.
         if isinstance(exc, (ValueError, RuntimeError, KeyError)):

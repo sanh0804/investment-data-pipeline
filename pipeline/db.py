@@ -19,13 +19,13 @@ def connect():
     )
 
 
-def upsert(conn, candles, fetch_id):
+def upsert(conn, candles, fetch_id, product=PRODUCT):
     with conn.cursor() as cursor:
         cursor.executemany(
             """
             INSERT INTO market.daily_prices
                 (source, product_id, price_date, bucket_start, open_price,
-                 high_price, low_price, close_price, volume_btc, last_fetch_id)
+                 high_price, low_price, close_price, volume_base, last_fetch_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source, product_id, price_date) DO UPDATE SET
                 bucket_start = EXCLUDED.bucket_start,
@@ -33,10 +33,10 @@ def upsert(conn, candles, fetch_id):
                 high_price = EXCLUDED.high_price,
                 low_price = EXCLUDED.low_price,
                 close_price = EXCLUDED.close_price,
-                volume_btc = EXCLUDED.volume_btc,
+                volume_base = EXCLUDED.volume_base,
                 last_fetch_id = EXCLUDED.last_fetch_id,
                 loaded_at = CURRENT_TIMESTAMP
             """,
-            [(SOURCE, PRODUCT, c.bucket_start.date(), c.bucket_start,
+            [(SOURCE, product, c.bucket_start.date(), c.bucket_start,
               c.open, c.high, c.low, c.close, c.volume, fetch_id) for c in candles],
         )

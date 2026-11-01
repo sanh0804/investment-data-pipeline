@@ -1,0 +1,29 @@
+{
+  "origin": "fixture_only_never_load_into_live_tables",
+  "customers": 4,
+  "trades": 6,
+  "customers_with_trades": 3,
+  "customers_without_trades": 1,
+  "notional_usd": "475.94",
+  "fee_usd": "0.48",
+  "by_side": {
+    "BUY": {"trades": 3, "notional_usd": "330.86", "fee_usd": "0.33"},
+    "SELL": {"trades": 3, "notional_usd": "145.08", "fee_usd": "0.15"}
+  },
+  "by_product": {
+    "BTC-USD": {"trades": 2, "quantity": "2.500000", "notional_usd": "255.00", "fee_usd": "0.26"},
+    "ETH-USD": {"trades": 2, "quantity": "4.234567", "notional_usd": "90.86", "fee_usd": "0.09"},
+    "SOL-USD": {"trades": 2, "quantity": "12.500000", "notional_usd": "130.08", "fee_usd": "0.13"}
+  },
+  "by_customer": {
+    "00000000-0000-4000-8000-000000000001": {"trades": 3, "notional_usd": "290.86", "fee_usd": "0.29"},
+    "00000000-0000-4000-8000-000000000002": {"trades": 2, "notional_usd": "155.00", "fee_usd": "0.16"},
+    "00000000-0000-4000-8000-000000000003": {"trades": 0, "notional_usd": "0.00", "fee_usd": "0.00"},
+    "00000000-0000-4000-8000-000000000004": {"trades": 1, "notional_usd": "30.08", "fee_usd": "0.03"}
+  },
+  "by_date": {
+    "2026-05-01": {"trades": 2, "notional_usd": "260.00", "fee_usd": "0.26"},
+    "2026-05-02": {"trades": 2, "notional_usd": "155.00", "fee_usd": "0.16"},
+    "2026-05-03": {"trades": 2, "notional_usd": "60.94", "fee_usd": "0.06"}
+  }
+}
