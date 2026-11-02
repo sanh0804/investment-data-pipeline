@@ -1,12 +1,12 @@
 # Investment Data Pipeline & Analytics
 
 Personal portfolio project cho Data Engineering / Data Analytics.
-Hiện hoàn thành tới chặng 3: giá ngày BTC/ETH/SOL thật từ Coinbase Exchange,
-1.000 khách hàng và 50.000 giao dịch đã khớp **hoàn toàn synthetic**, dbt analytics
-và một dashboard Metabase local.
+Pipeline thu thập giá ngày BTC/ETH/SOL từ Coinbase Exchange và tạo bộ dữ liệu
+1.000 khách hàng, 50.000 giao dịch đã khớp **hoàn toàn synthetic**. dbt xây các
+models analytics, Metabase cung cấp dashboard giao dịch và hoạt động khách hàng.
 
-Stack đã chốt: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose,
-GitHub Actions. Đã có dbt Core/Metabase; chưa dựng Airflow hay CI; dừng sau 3 để review.
+Stack triển khai: Python, PostgreSQL, dbt Core, Metabase và Docker Compose.
+Pipeline chạy batch thủ công trên máy local; Airflow và GitHub Actions là hướng mở rộng.
 Không mô phỏng số dư, holdings, P&L, SCD2, retention hay RFM scoring.
 
 ## Setup macOS
@@ -35,7 +35,7 @@ chmod 600 .env
 Nếu tạo `.env` mới, thay placeholder `POSTGRES_PASSWORD` bằng mật khẩu local
 ngẫu nhiên trước khi chạy database. Có thể tạo bằng:
 `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
-Giữ nguyên password nếu dùng database chặng 1; sửa env không tự đổi password
+Giữ nguyên password nếu dùng database đã khởi tạo; sửa env không tự đổi password
 trong volume đã có. Không commit `.env`. API đã chọn không dùng API key.
 
 ```bash
@@ -48,14 +48,14 @@ PostgreSQL bind `127.0.0.1:55432`, có healthcheck và volume riêng. Không đ�
 PostgreSQL khác ở 5432. Nếu host port bận, đổi `POSTGRES_PORT` trong `.env`.
 `init_db` chạy các migration `sql/NNN_*.sql` theo thứ tự và ghi vào
 `public.schema_migrations`, toàn bộ trong transaction, có advisory lock.
-Chạy lại không xóa bảng/volume. Chặng 2A giữ toàn bộ dữ liệu chặng 1, mở whitelist
-product và đổi tên `volume_btc` thành `volume_base` (BTC/ETH/SOL tương ứng).
+Chạy lại không xóa bảng/volume. Migration `002` mở whitelist product và đổi tên
+`volume_btc` thành `volume_base`, giữ nguyên dữ liệu đã có.
 Không sửa nội dung migration đã áp dụng; thêm migration mới khi đổi schema.
 
 ## Thu thập 180 ngày giá live
 
 Khoảng kiểm chứng cố định: **[2026-05-01, 2026-10-28) UTC**, gồm đúng 180 ngày.
-Dùng explicit environment để không vô tình lấy khoảng 3 ngày từ `.env` chặng 1:
+Truyền rõ cấu hình để kết quả không phụ thuộc khoảng ngày có sẵn trong `.env`:
 
 ```bash
 START_DATE=2026-05-01 END_DATE=2026-10-28 \
@@ -164,7 +164,7 @@ FK ràng buộc dataset/customer, market price key và raw fetch provenance; che
 constraints ràng buộc side, status, số dương và các công thức tiền. Customer-time
 ordering và cohort behavior được kiểm tra ở bước verification, chưa có trigger.
 
-## Kiểm chứng và fixture cho chặng 2B
+## Kiểm chứng và reconciliation fixture
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -201,7 +201,7 @@ Bộ nhỏ [tests/fixtures/reconciliation](tests/fixtures/reconciliation/README.
 4 customers, 6 trades, giá hoàn toàn giả, **475.94 USD notional và 0.48 USD phí**.
 Có CSV riêng và expected totals viết rõ theo customer/product/side/date, gồm ca
 rounding 0.055 → 0.06 và 30.075 → 30.08. Source `fixture` không hợp lệ với live
-schema; unit tests chỉ đọc file. Chặng 2B còn chạy chính SQL dbt models trên fixture
+schema; unit tests chỉ đọc file. Integration tests chạy chính SQL dbt models trên fixture
 ở DB test và đối chiếu expected JSON.
 
 ## File chính và vận hành
@@ -216,11 +216,11 @@ schema; unit tests chỉ đọc file. Chặng 2B còn chạy chính SQL dbt mode
 | `pipeline/synthetic.py` | Generator, stable IDs và load synthetic |
 | `pipeline/verify_stage2a.py`, `verify_idempotency.py` | Verification, replay |
 | `sql/verify_2a.sql` | SQL kiểm tra coverage, FK, thời gian và totals |
-| `tests/fixtures/reconciliation/` | Dataset nhỏ và expected totals cho 2B |
+| `tests/fixtures/reconciliation/` | Dataset nhỏ và expected totals cho reconciliation |
 | `analytics/models/`, `analytics/tests/`, `analytics/macros/` | dbt models, data tests và scope/key macros |
 | `scripts/run_dbt.py`, `scripts/verify_dbt.py`, `compose.test.yaml` | Env wrapper và isolated fixture/migration tests |
 | `docs/models.md`, `sql/verify_2b.sql` | Analytics contract và SQL đối soát demo |
-| `docs/` | Quyết định, kiến thức và bằng chứng đã chạy |
+| `docs/` | Quyết định thiết kế, model contracts và bằng chứng kiểm chứng |
 
 Xem `docker compose ps`, `docker compose logs --tail=100 postgres` khi lỗi.
 Dừng bằng `docker compose stop`, khởi động lại bằng `docker compose up -d --wait`.
@@ -229,7 +229,7 @@ image digest; Python khóa direct dependency versions, chưa có transitive lock
 Chưa có scheduler, alerting, run-status table, production roles hoặc kiểm chứng concurrency
 cho collector. Các giới hạn/chưa chạy được ghi trong verification.
 
-## dbt analytics — chặng 2B
+## dbt analytics
 
 Python hiện có 3.13.5. dbt-postgres 1.11.0 công bố hỗ trợ Python 3.13;
 đã cài và build thực tế thành công với dbt Core 1.11.0 trên máy này.
@@ -321,7 +321,7 @@ data/verify_2b_*/. tmpfs chỉ là dữ liệu test tạm, không phải persist
 Collector .venv và nguồn demo được giữ; source checksums được so sánh trước/sau.
 Chưa đưa tests vào CI. analytics/target, analytics/logs và .venv-dbt được Git ignore.
 
-## Metabase dashboard — chặng 3
+## Metabase dashboard
 
 Truy cập **http://localhost:3000/dashboard/2** trên máy hiện tại. Khi tái tạo ở
 metadata DB mới, ID có thể khác: setup script in URL thực tế và lưu data/metabase-state.json.
@@ -331,7 +331,7 @@ synthetic customers/executions, Coinbase daily-close reference, portfolio-v1 và
 
 ### Setup và tái tạo
 
-Dữ liệu analytics từ 2B phải có sẵn. Với clone mới cần chạy các bước collector,
+Dữ liệu analytics phải có sẵn. Với clone mới cần chạy các bước collector,
 synthetic và dbt ở trên trước; Git không chứa database/volume của máy hiện tại.
 
 ```bash
@@ -423,4 +423,4 @@ bố cục rộng đầy đủ; không cần tạo cards/filters thủ công. Pa
 chưa cấu hình SMTP hoặc reset password qua email. Không bật public dashboard sharing.
 
 Tài liệu [verification](docs/verification.md) ghi bằng chứng và phần chưa chạy;
-không thêm Airflow, CI, AI, RFM hoặc retention ở chặng này.
+Airflow, CI, AI, RFM và retention nằm ngoài phạm vi triển khai.

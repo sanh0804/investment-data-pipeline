@@ -1,19 +1,19 @@
-# Quyết định theo chặng
+# Quyết định thiết kế
 
-Các phần theo chặng giữ lịch sử quyết định. Chặng 2A thay giới hạn BTC-only,
-window đơn và tên volume; chặng 2B thêm analytics dbt, không thay source contracts.
+Các quyết định dưới đây giải thích source contracts, cách lưu dữ liệu, mô hình
+analytics và phạm vi vận hành local. Bằng chứng chạy thực tế nằm trong verification.md.
 
-## 2026-11-01 — Phạm vi
+## Phạm vi
 
-Triển khai Python + PostgreSQL + Docker Compose cho daily BTC-USD. Chưa dựng
-orchestration, BI hay business datasets. Quy tắc bền vững ở `AGENTS.md`, hướng dẫn
-sản phẩm/vận hành ở README. Không tạo framework agent riêng.
+Python collector thu thập daily BTC/ETH/SOL vào PostgreSQL; dbt xây analytics và
+Metabase hiển thị dashboard. Docker Compose phục vụ vận hành local. Orchestration
+và CI là hướng mở rộng. Quy tắc làm việc ở `AGENTS.md`, hướng dẫn vận hành ở README.
 
 ## Provider và kiểm chứng API trước khi normalize
 
 Chọn Coinbase Exchange endpoint public:
 `GET https://api.exchange.coinbase.com/products/BTC-USD/candles`.
-Request thực tế không kèm API key đã trả HTTP 200 từ máy này ngày 01/11/2026.
+Request thực tế không kèm API key đã trả HTTP 200 trong lần kiểm chứng.
 Đây là kiểm chứng quyền truy cập tại thời điểm chạy, không bảo đảm truy cập mọi
 quốc gia/mạng hoặc mọi thời điểm. Không xác minh bằng cách cố tình flood API.
 
@@ -21,7 +21,7 @@ Tài liệu provider: [Get product candles](https://docs.cdp.coinbase.com/api-re
 [REST rate limits](https://docs.cdp.coinbase.com/exchange/rest-api/rate-limits).
 Giới hạn tài liệu: 300 candles/request, public 10 requests/second/IP, burst 15;
 429 khi vượt giới hạn. Không poll liên tục, chỉ gọi từng lần theo khoảng ngày.
-Không có API key/paid plan được dùng trong chặng này; chưa kiểm chứng quota thực
+Không có API key/paid plan được dùng; chưa kiểm chứng quota thực
 nghiệm hay các hạn chế ngoài tài liệu.
 
 ## Timestamp, ngày và giá
@@ -38,7 +38,7 @@ và chỉ nhận ngày đã hoàn tất. Timestamp/shape thay đổi sẽ bị t
 
 BTC-USD là sản phẩm tại Coinbase, quote USD, volume theo BTC. Chưa mô hình hóa
 global reference price hay multi-provider reconciliation. Tối đa 299 ngày để chừa
-một nến ở end, chưa chia request tự động.
+một nến ở end; collector chia khoảng dài thành các windows.
 
 ## Storage và giao dịch
 
@@ -67,13 +67,9 @@ Retry có budget attempts/timeouts và chờ hữu hạn; không retry permanent
 Nếu Retry-After dài hơn budget thì dừng. Không có disk spool khi database down,
 không có scheduler tự chạy, chưa có run-status table hoặc alerting.
 
-Các quyết định trên phục vụ learning scope chặng 1; chưa tuyên bố production-ready.
+Thiết kế phục vụ portfolio local, chưa tuyên bố production-ready.
 
-## 2026-11-01 — Chặng 2A: multi-asset và synthetic
-
-Chặng 1 đã có commit `4153807` trước khi sửa chặng 2A; working tree/staged trống.
-Đã đọc code/docs và xác nhận tracked files không chứa .env, venv, data local hay
-mật khẩu local. Không tạo commit rỗng và không push. Cập nhật AGENTS theo scope mới.
+## Multi-asset và synthetic
 
 ### Coinbase và lịch sử theo product
 
@@ -81,7 +77,7 @@ Giữ provider. Probe `/products/BTC-USD`, `/products/ETH-USD`, `/products/SOL-U
 đều HTTP 200, base đúng BTC/ETH/SOL, quote USD, status online, trading_disabled=false.
 Probe daily candles vượt 300 ngày thực tế trả HTTP 400 với thông báo count of
 aggregations exceeds 300. Không thử tải sát quota theo IP hoặc cố tình tạo 429.
-Tài liệu candles và rate limit dẫn ở phần chặng 1 vẫn là nguồn tham chiếu.
+Tài liệu candles và rate limit ở trên là nguồn tham chiếu.
 
 Chọn range cố định `[2026-05-01,2026-10-28)` = 180 completed UTC days. Chia 3
 windows 60 ngày: May 1→Jun 30, Jun 30→Aug 29, Aug 29→Oct 28, cho mỗi product.
@@ -95,7 +91,7 @@ range thực tế đã lấy, không tuyên bố lịch sử đầy đủ trư�
 ### Migrations và preservation
 
 Giữ nguyên `001_schema.sql` đã commit. Migration `002` mở product CHECK, rename
-volume_btc→volume_base, giữ values/keys/FK/raw của chặng 1 và thêm schema synthetic.
+volume_btc→volume_base, giữ values/keys/FK/raw đã có và thêm schema synthetic.
 `init_db` ghi migration filenames, dùng transaction/advisory lock và skip migration
 đã chạy. Không drop bảng, xóa row hay reset volume.
 
@@ -135,20 +131,17 @@ không tự reprice lịch sử synthetic. Input price không đổi nhưng fetc
 cho rerun, giữ raw lineage ban đầu. Synthetic INSERT ON CONFLICT DO NOTHING,
 đối chiếu full business checksum/counts trước commit để phát hiện dữ liệu bị sửa.
 
-### Fixture nhỏ và scope tiếp theo
+### Reconciliation fixture
 
 Fixture tách ở tests/fixtures/reconciliation: source=fixture, 4 customers/6 trades,
 giá giả rõ ràng, expected totals viết độc lập. Không có command nạp fixture vào live;
 source CHECK cũng ngăn ghi fixture trực tiếp. Mẫu gồm zero-trade customer, cả BUY/SELL,
-fee half-cent và notional half-cent để chặng 2B có oracle kiểm thử.
-Chưa thêm dbt, Airflow, Metabase, CI, analytics models, balances, holdings hoặc P&L.
+fee half-cent và notional half-cent làm oracle kiểm thử dbt/reconciliation.
 
-## 2026-11-01 — Chặng 2B: dbt analytics
+## dbt analytics
 
-Đã review diff, staged files, artifacts và đối chiếu password local với candidate
-contents trước khi commit 2A thành `933071b`. Không push remote. Không sửa migrations
-001/002 đã áp dụng và không xóa volume/data. Schema nguồn được đọc trực tiếp từ
-information_schema trước khi quyết định joins.
+Giữ nguyên migrations đã áp dụng và dữ liệu nguồn. Đọc schema thực tế trước khi
+quyết định joins; dbt chỉ ghi vào analytics schema riêng.
 
 ### Runtime và credentials
 
@@ -202,7 +195,7 @@ fixture vào fixture_input (LIKE source types/defaults, không copy production c
 Market/synthetic chuẩn của test DB vẫn rỗng. Không drop DB hoặc xóa data sau test;
 server/DB test được giữ để review và tmpfs không dùng làm persistence.
 
-Fixture là 4 customers/6 trades của 2A, expected_totals.json giữ nguyên. Chạy chính
+Fixture gồm 4 customers/6 trades, expected_totals.json giữ nguyên. Chạy chính
 models bằng source-schema variables trên test DB, không có SQL models riêng cho test.
 Thêm adversarial rows của dataset khác dùng cùng UUID, provider khác cùng pair/day
 và future customer/trade. Baseline phải vẫn khớp JSON theo global/customer/product/side/date.
@@ -212,12 +205,11 @@ Bốn cutoffs kiểm tra dates/recency/segments và chống future-data leakage;
 88 data tests cùng Python assertions trên output dbt bổ sung cho nhau; không dùng
 Python fixture-only tests thay dbt. Artifacts mỗi test case ở target path riêng để
 không đè manifest/run_results của demo. So checksum các demo source tables trước/sau.
-Chưa thêm Airflow, Metabase, AI, CI, SCD2, retention, RFM, balances, holdings hoặc P&L.
+Không thêm incremental models hoặc historical snapshots trong analytics hiện có.
 
-## 2026-11-02 — Chặng 3: Metabase local dashboard
+## Metabase dashboard
 
-Commit 2B trước triển khai: 5993a26. Kiểm tra daily grain thật và document lịch
-synthetic trước khi dựng chart. Giữ 116 rows ở mart, không sửa generator/nguồn;
+Kiểm tra daily grain và lịch synthetic trước khi dựng chart. Giữ 116 rows ở mart, không sửa generator/nguồn;
 zero days là reporting padding qua dim_date. Asset/side đọc fact.
 
 Chọn official image metabase/metabase:v0.64.1, Docker manifest có arm64, native
