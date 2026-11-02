@@ -11,7 +11,9 @@ và CI là hướng mở rộng. Quy tắc làm việc ở `AGENTS.md`, hướng
 
 ## Provider và kiểm chứng API trước khi normalize
 
-Chọn Coinbase Exchange endpoint public:
+Coinbase Exchange cung cấp OHLCV theo sản phẩm qua endpoint public, đủ cho
+bài toán giá ngày mà không cần quản lý API key:
+
 `GET https://api.exchange.coinbase.com/products/BTC-USD/candles`.
 Request thực tế không kèm API key đã trả HTTP 200 trong lần kiểm chứng.
 Đây là kiểm chứng quyền truy cập tại thời điểm chạy, không bảo đảm truy cập mọi
@@ -209,8 +211,9 @@ Không thêm incremental models hoặc historical snapshots trong analytics hi�
 
 ## Metabase dashboard
 
-Kiểm tra daily grain và lịch synthetic trước khi dựng chart. Giữ 116 rows ở mart, không sửa generator/nguồn;
-zero days là reporting padding qua dim_date. Asset/side đọc fact.
+Daily mart lưu ngày có giao dịch ở grain dataset/day. Dashboard cần cả ngày
+không giao dịch nên bổ sung calendar bằng dim_date khi truy vấn; mart vẫn giữ
+116 rows. Breakdown asset/side đọc fact vì hai chiều này không có trong mart.
 
 Chọn official image metabase/metabase:v0.64.1, Docker manifest có arm64, native
 arm64 đã chạy. Metadata tách sang service metabase_db và named volume riêng;
@@ -233,6 +236,6 @@ revenue; active customers DISTINCT trực tiếp. Customer snapshot cutoff cố 
 không giả đổi segment theo trading filters. Banner/title ghi synthetic và Coinbase
 reference prices. Không dùng AI, public sharing, SMTP hoặc scheduled subscriptions.
 
-UI kiểm bằng in-app browser; screenshot lưu đúng viewport đang thấy sau khi scroll,
-không mock/composite. Native Chrome automation timeout nên để user review desktop
-trên Mac; toàn bộ dashboard setup, queries, filters và persistence đã thực hiện.
+SQL và API checks đối chiếu dữ liệu cards; kiểm tra UI bổ sung việc chọn filters
+và đọc kết quả hiển thị. Ảnh lưu viewport thật trong in-app browser. Phạm vi kiểm
+chứng layout không bao gồm desktop Chrome/Safari; chi tiết ở verification.md.

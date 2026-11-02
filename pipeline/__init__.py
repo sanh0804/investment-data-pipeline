@@ -1,1 +1,1 @@
-"""Coinbase daily prices and clearly separated synthetic portfolio datasets."""
+"""Coinbase daily prices and synthetic trading datasets."""

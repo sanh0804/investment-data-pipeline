@@ -1,4 +1,4 @@
-"""Real dbt fixture builds and migrations in fresh DB on a separate tmpfs server.
+"""Run fixture builds and fresh migrations on a separate tmpfs PostgreSQL server.
 
 No DROP/TRUNCATE/DELETE, no writes to the demo inputs. Test DBs remain for review.
 """

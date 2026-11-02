@@ -8,6 +8,7 @@ Personal portfolio project for Data Engineering / Data Analytics roles, on macOS
 - Do not implement Airflow, CI, AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L in stage 3.
 - Inspect machine architecture and installed tools; never assume Intel or Apple Silicon.
 - Keep the repository small and understandable. Prefer explicit SQL and ordinary Python functions over extra frameworks.
+- Write docs and comments around concrete design choices, assumptions, trade-offs and observed results. Avoid progress-report filler and repeated scope disclaimers. Comments should explain non-obvious reasons. Preserve verification evidence and disclose assistance accurately; do not invent research, benchmarks or authorship claims.
 - Verify provider documentation and a real response before choosing timestamp/day semantics. Distinguish an exchange price from a market-wide price.
 - Use UTC explicitly, Decimal for prices and PostgreSQL NUMERIC. Define grain, unique key, and conflict policy before writing normalized data.
 - Preserve raw responses and fetch metadata before normalization, including unsuccessful HTTP attempts. Never present fixtures as successful live collection.

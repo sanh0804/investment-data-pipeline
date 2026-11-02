@@ -1,4 +1,4 @@
-"""Provision a query-only role; no ownership, source writes or role memberships."""
+"""Grant analytics SELECT to the Metabase query role and check write privileges."""
 import os
 from pathlib import Path
 import sys

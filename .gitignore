@@ -12,3 +12,4 @@ __pycache__/
 .DS_Store
 data/
 docs/learning-notes.md
+/investment_pipeline_summary_and_interview_notes.md

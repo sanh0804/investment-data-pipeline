@@ -1,17 +1,46 @@
 # Investment Data Pipeline & Analytics
 
-Personal portfolio project cho Data Engineering / Data Analytics.
-Pipeline thu thập giá ngày BTC/ETH/SOL từ Coinbase Exchange và tạo bộ dữ liệu
-1.000 khách hàng, 50.000 giao dịch đã khớp **hoàn toàn synthetic**. dbt xây các
-models analytics, Metabase cung cấp dashboard giao dịch và hoạt động khách hàng.
+Bài toán của project là đưa dữ liệu từ API đến báo cáo và kiểm tra số liệu ở từng
+lớp: dữ liệu gốc, bảng chuẩn hóa, fact, mart và dashboard. Nguồn giá là nến ngày
+BTC/ETH/SOL từ Coinbase Exchange. Phần giao dịch gồm 1.000 khách hàng và 50.000
+matched trades **synthetic**, dùng để kiểm tra phép tổng hợp và phân nhóm khách hàng.
 
 Stack triển khai: Python, PostgreSQL, dbt Core, Metabase và Docker Compose.
 Pipeline chạy batch thủ công trên máy local; Airflow và GitHub Actions là hướng mở rộng.
 Không mô phỏng số dư, holdings, P&L, SCD2, retention hay RFM scoring.
 
+## Dashboard preview
+
+Ảnh chụp Metabase local với dataset `portfolio-v1`, cutoff **2026-10-27 UTC**.
+Khách hàng và giao dịch là synthetic; giá tham chiếu lấy từ Coinbase.
+
+**Tổng quan giao dịch:** volume, phí, số giao dịch, distinct active customers và
+biểu đồ theo ngày.
+
+![Metabase: tổng quan giao dịch và biểu đồ volume, phí theo ngày](docs/screenshots/dashboard_1.png)
+
+**Phân tích chi tiết:** volume theo asset/BUY/SELL, customer segments tại cutoff
+và khách hàng theo tổng phí. Hai customer cards giữ snapshot khi lọc ngày/asset.
+
+![Metabase: volume theo asset, customer segments và bảng khách hàng theo phí](docs/screenshots/dashboard_2.png)
+
+## Các lựa chọn thiết kế
+
+| Lựa chọn | Lý do và đánh đổi |
+| --- | --- |
+| Lưu raw trước khi normalize | Có thể kiểm tra payload và replay khi logic thay đổi; số raw rows tăng khi fetch lại. |
+| Upsert giá theo source/product/ngày UTC | Chạy lại giữ nguyên grain, nhận được giá lịch sử đã sửa; bảng chuẩn hóa chỉ giữ phiên bản mới nhất. |
+| Cố định seed, khoảng ngày và price-input hash | So sánh kết quả giữa các lần chạy; dataset đã đăng ký sẽ từ chối input khác thay vì tự sinh lại. |
+| dbt models dạng table, staging dạng view | Dễ đối chiếu ở quy mô 50.000 trades; cần build lại tables sau khi sources đổi. |
+| Fixture nhỏ chạy qua cùng dbt models | Có expected totals tính độc lập để bắt lỗi join, cutoff và rounding mà tổng lớn có thể che mất. |
+| Metabase dùng SELECT role riêng | Dashboard đọc analytics; app metadata nằm ở database và volume riêng. |
+
+Chi tiết ở [decisions](docs/decisions.md), [model contracts](docs/models.md) và
+[verification](docs/verification.md).
+
 ## Setup macOS
 
-Kiểm tra architecture và công cụ trước, không mặc định Intel/Apple Silicon:
+Kiểm tra môi trường trước khi cài dependencies:
 
 ```bash
 uname -m
@@ -63,8 +92,8 @@ PRODUCTS=BTC-USD,ETH-USD,SOL-USD REQUEST_CHUNK_DAYS=60 \
 .venv/bin/python -m pipeline.collector
 ```
 
-Chạy cùng lệnh lần nữa để kiểm tra rerun. Dự kiến 540 normalized rows nếu API có
-đủ lịch sử; chương trình không giả định điều đó chỉ vì product tồn tại.
+Với ba sản phẩm và 180 ngày đầy đủ, kết quả là 540 normalized rows. Collector
+kiểm tra coverage từng ngày; product metadata không đủ để kết luận có đủ lịch sử.
 Nếu bỏ cả START_DATE/END_DATE trong env và `.env`, mặc định 180 ngày UTC hoàn tất
 gần nhất. Chỉ đặt một trong hai biến là lỗi. Shell environment ưu tiên `.env`.
 
@@ -279,7 +308,8 @@ Grain đã kiểm tra là (dataset_id,trade_date), không phải ngày × asset 
 Regular customers giao dịch cách 3–4 ngày theo hai lịch chung (55/56 trades),
 ceased dùng lịch 55 trades trong 120 ngày đầu. Union lịch regular 91 ngày với
 ceased 55 ngày, trùng 30 ngày → 116 ngày trade và 64 ngày zero-trade.
-Đây là đặc tính dữ liệu synthetic, không sửa để làm đẹp; asset/side breakdown đọc fact.
+Các lịch trong cùng cohort được đồng bộ, nên số ngày hoạt động không đại diện
+cho phân bố khách hàng thực. Asset/side breakdown đọc fact.
 
 ```bash
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_2b.sql
@@ -416,11 +446,10 @@ phần dashboard đang thấy; không phải ảnh ghép toàn bộ dashboard de
 [default trade/customer counts](docs/screenshots/metabase-default-counts.jpg),
 [tháng 6 + ETH](docs/screenshots/metabase-june-eth.jpg).
 
-Đã đăng nhập UI local, thao tác date picker và asset dropdown, xác minh KPI/snapshot.
-Chrome native automation bị timeout nên chưa xác minh layout desktop bằng Chrome.
-Trên Mac, bạn chỉ cần mở URL trong Chrome/Safari, đăng nhập bằng .env và kiểm tra
-bố cục rộng đầy đủ; không cần tạo cards/filters thủ công. Password/email chỉ dùng local,
-chưa cấu hình SMTP hoặc reset password qua email. Không bật public dashboard sharing.
+Provisioning script tạo sẵn cards, layout và filter mappings. Mở URL được script
+in ra, đăng nhập bằng credentials trong .env. Date/asset filters đã được kiểm tra
+qua API và in-app browser; layout desktop Chrome/Safari chưa được agent kiểm chứng.
+Chưa cấu hình SMTP, password reset qua email hoặc public dashboard sharing.
 
 Tài liệu [verification](docs/verification.md) ghi bằng chứng và phần chưa chạy;
 Airflow, CI, AI, RFM và retention nằm ngoài phạm vi triển khai.

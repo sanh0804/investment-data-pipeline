@@ -1,4 +1,4 @@
-"""Replay one stored LIVE response twice; never fetch or invent a fixture."""
+"""Replay a stored response in two committed transactions and compare business rows."""
 import argparse
 import hashlib
 import json

@@ -1,4 +1,4 @@
-"""Recreate/update one local dashboard from versioned SQL. Secrets stay in .env."""
+"""Provision the local dashboard from SQL files and environment configuration."""
 import json
 import os
 from pathlib import Path
@@ -123,7 +123,7 @@ def main():
     payload={'name':TITLE,'collection_id':collection['id'],'parameters':PARAMETERS,
              'description':'SYNTHETIC customers & executions | Coinbase daily-close reference | portfolio-v1 | cutoff 2026-10-27 UTC. Filters apply only to trading cards; customer cards remain fixed snapshots.'}
     dashboard=client.call('PUT',f"/dashboard/{existing['id']}",payload) if existing else client.call('POST','/dashboard',payload)
-    # Reuse placement IDs on rerun, never append duplicate dashcards.
+    # Reuse placement IDs so reruns update the layout without adding duplicate cards.
     current=client.call('GET',f"/dashboard/{dashboard['id']}")
     old={d.get('card_id'):d['id'] for d in current.get('dashcards',[])}
     banner=('## SYNTHETIC TRADING · Portfolio analytics\n'

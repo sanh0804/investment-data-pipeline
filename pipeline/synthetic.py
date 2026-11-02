@@ -1,4 +1,4 @@
-"""Deterministic, explicitly synthetic matched trades; no balances or P&L."""
+"""Generate seeded matched trades from a fixed daily-close snapshot."""
 import argparse
 import hashlib
 import json

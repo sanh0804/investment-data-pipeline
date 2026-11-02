@@ -28,7 +28,7 @@ def retry_delay(header, attempt, settings):
             except (ValueError, TypeError, OverflowError):
                 requested = 0
         delay = max(delay, requested)
-    # Do not hammer the provider if Retry-After exceeds our permitted wait budget.
+    # Stop when Retry-After exceeds the configured wait budget.
     if delay > settings.max_retry_delay:
         raise RuntimeError("Retry delay exceeds configured maximum; rerun later")
     return max(0, delay)

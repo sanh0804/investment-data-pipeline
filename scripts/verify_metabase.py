@@ -1,4 +1,4 @@
-"""Query actual Metabase cards and reconcile with independent PostgreSQL SQL."""
+"""Reconcile saved Metabase card results with independent PostgreSQL queries."""
 import json
 import os
 from pathlib import Path

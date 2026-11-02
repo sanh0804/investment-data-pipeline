@@ -1,6 +1,6 @@
-# Analytics contract — chặng 2B
+# Analytics model contracts
 
-Project dbt: `analytics/`. Sources đọc existing synthetic/market, dbt chỉ ghi vào
+Project dbt: `analytics/`. Sources là synthetic/market; dbt ghi vào
 `analytics` hoặc schema bắt đầu bằng `analytics_`. Demo dùng PostgreSQL hiện có;
 fixture/migration tests dùng server tmpfs riêng, port 55433. Không ghi fixture vào
 market/synthetic demo. Credentials chỉ ở env, password dùng DBT_ENV_SECRET_PASSWORD.
@@ -112,7 +112,8 @@ hai lịch cố định (500 khách có 56 trades, 100 khách có 55), tạo uni
 với regular. Union = 91+55-30=116, còn 64 zero-trade days. Regular spacing nghĩa
 khoảng cách giữa hai ngày trade của từng khách là 3 hoặc 4 ngày, không phải mỗi
 ngày đều trade hay mỗi khách có lịch độc lập. Ceased spacing là 2 hoặc 3 ngày,
-trade cuối 2026-08-28. Không sửa dữ liệu để tăng số ngày có giao dịch.
+trade cuối 2026-08-28. Phân bố này phản ánh lịch của generator, không dùng để
+suy luận tần suất giao dịch của khách hàng thực.
 
 **mart_customer_summary:** dataset_id, customer_id/customer_key, created_at,
 as_of_date, first_trade_date, last_trade_date, days_since_last_trade,
