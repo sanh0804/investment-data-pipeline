@@ -1,46 +1,63 @@
 # Investment Data Pipeline & Analytics
 
-Bài toán của project là đưa dữ liệu từ API đến báo cáo và kiểm tra số liệu ở từng
-lớp: dữ liệu gốc, bảng chuẩn hóa, fact, mart và dashboard. Nguồn giá là nến ngày
-BTC/ETH/SOL từ Coinbase Exchange. Phần giao dịch gồm 1.000 khách hàng và 50.000
-matched trades **synthetic**, dùng để kiểm tra phép tổng hợp và phân nhóm khách hàng.
+A local batch pipeline that takes data from an API to an analytics dashboard, with
+reconciliation across raw storage, normalized tables, facts, and marts.
 
-Stack triển khai: Python, PostgreSQL, dbt Core, Metabase và Docker Compose.
-Pipeline chạy batch thủ công trên máy local; Airflow và GitHub Actions là hướng mở rộng.
-Không mô phỏng số dư, holdings, P&L, SCD2, retention hay RFM scoring.
+Daily BTC, ETH, and SOL candles come from **Coinbase Exchange**. The customer and
+execution data—**1,000 customers and 50,000 matched trades—are entirely synthetic**.
+They provide a controlled dataset for testing aggregations, monetary calculations,
+and customer activity summaries.
+
+**Stack:** Python, PostgreSQL, dbt Core, Metabase, and Docker Compose.
+Runs are triggered manually. Airflow and GitHub Actions are planned extensions.
+The project does not model balances, holdings, or P&L.
 
 ## Dashboard preview
 
-Ảnh chụp Metabase local với dataset `portfolio-v1`, cutoff **2026-10-27 UTC**.
-Khách hàng và giao dịch là synthetic; giá tham chiếu lấy từ Coinbase.
+Screenshots from local Metabase using `portfolio-v1`, with an **October 27, 2026 UTC**
+cutoff. Customers and executions are synthetic; reference prices come from Coinbase.
 
-**Tổng quan giao dịch:** volume, phí, số giao dịch, distinct active customers và
-biểu đồ theo ngày.
+**Trading overview:** volume, fees, trade count, distinct active customers, and daily trends.
 
-![Metabase: tổng quan giao dịch và biểu đồ volume, phí theo ngày](docs/screenshots/dashboard_1.png)
+![Metabase trading overview with volume, fees, trade count, and daily charts](docs/screenshots/dashboard_1.png)
 
-**Phân tích chi tiết:** volume theo asset/BUY/SELL, customer segments tại cutoff
-và khách hàng theo tổng phí. Hai customer cards giữ snapshot khi lọc ngày/asset.
+**Breakdowns:** volume by asset and BUY/SELL, customer segments, and customers ranked
+by fees. Customer cards remain fixed snapshots when trading filters change.
 
-![Metabase: volume theo asset, customer segments và bảng khách hàng theo phí](docs/screenshots/dashboard_2.png)
+![Metabase asset breakdown, customer segments, and customers ranked by fees](docs/screenshots/dashboard_2.png)
 
-## Các lựa chọn thiết kế
+## Architecture and design choices
 
-| Lựa chọn | Lý do và đánh đổi |
+```text
+Coinbase daily candles
+  → raw.price_fetches: response bytes, SHA-256, request metadata
+  → Python validation: UTC buckets, completeness, OHLC, Decimal
+  → market.daily_prices: upsert by source/product/day
+  → seeded generator: fixed daily-close inputs
+  → synthetic.datasets → synthetic.customers → synthetic.trades
+
+market/synthetic → dbt staging → dimensions/fact → daily/customer marts
+  → read-only Metabase connection → SQL cards → dashboard
+
+CSV fixture → separate PostgreSQL test server → the same dbt models
+```
+
+| Choice | Reason and trade-off |
 | --- | --- |
-| Lưu raw trước khi normalize | Có thể kiểm tra payload và replay khi logic thay đổi; số raw rows tăng khi fetch lại. |
-| Upsert giá theo source/product/ngày UTC | Chạy lại giữ nguyên grain, nhận được giá lịch sử đã sửa; bảng chuẩn hóa chỉ giữ phiên bản mới nhất. |
-| Cố định seed, khoảng ngày và price-input hash | So sánh kết quả giữa các lần chạy; dataset đã đăng ký sẽ từ chối input khác thay vì tự sinh lại. |
-| dbt models dạng table, staging dạng view | Dễ đối chiếu ở quy mô 50.000 trades; cần build lại tables sau khi sources đổi. |
-| Fixture nhỏ chạy qua cùng dbt models | Có expected totals tính độc lập để bắt lỗi join, cutoff và rounding mà tổng lớn có thể che mất. |
-| Metabase dùng SELECT role riêng | Dashboard đọc analytics; app metadata nằm ở database và volume riêng. |
+| Store raw responses before normalization | Supports payload inspection and replay; raw rows grow with repeated requests. |
+| Upsert prices by source/product/UTC day | Reruns preserve the grain and accept corrected prices; normalized tables retain only the latest version. |
+| Fix the seed, date range, and price-input hash | Makes synthetic runs comparable; an existing dataset rejects changed inputs rather than regenerating silently. |
+| Materialize staging as views and downstream models as tables | Straightforward reconciliation at demo scale; tables need rebuilding after source updates. |
+| Run a small fixture through the same dbt models | Independent expected totals expose join, cutoff, and rounding errors that large totals can hide. |
+| Use a separate SELECT role for Metabase | Dashboard queries read analytics; application metadata lives in a separate database and volume. |
 
-Chi tiết ở [decisions](docs/decisions.md), [model contracts](docs/models.md) và
-[verification](docs/verification.md).
+Further detail: [design decisions](docs/decisions.md), [model contracts](docs/models.md),
+and [verification evidence](docs/verification.md). These supporting documents are in Vietnamese.
 
-## Setup macOS
+## Local setup
 
-Kiểm tra môi trường trước khi cài dependencies:
+Tested on macOS arm64 with Python 3.13.5 and Docker running Linux aarch64.
+Python 3.11 or later is required. Check your environment first:
 
 ```bash
 uname -m
@@ -51,8 +68,7 @@ docker info --format '{{.OSType}} {{.Architecture}}'
 git --version
 ```
 
-Đã chạy trên macOS arm64, Python 3.13.5, Docker Linux aarch64. Cần Python >=3.11.
-Chạy các lệnh từ repository root:
+Run commands from the repository root:
 
 ```bash
 python3 -m venv .venv
@@ -61,11 +77,16 @@ cp -n .env.example .env
 chmod 600 .env
 ```
 
-Nếu tạo `.env` mới, thay placeholder `POSTGRES_PASSWORD` bằng mật khẩu local
-ngẫu nhiên trước khi chạy database. Có thể tạo bằng:
-`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
-Giữ nguyên password nếu dùng database đã khởi tạo; sửa env không tự đổi password
-trong volume đã có. Không commit `.env`. API đã chọn không dùng API key.
+For a new `.env`, replace `POSTGRES_PASSWORD` with a random local password before
+starting PostgreSQL. One way to generate it:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Keep the existing password when reusing an initialized database. Changing `.env`
+does not change credentials already stored in a PostgreSQL volume. Never commit
+`.env`. The selected public Coinbase endpoint does not require an API key.
 
 ```bash
 .venv/bin/python scripts/init_metabase_env.py
@@ -73,18 +94,17 @@ docker compose up -d --wait postgres
 .venv/bin/python -m pipeline.init_db
 ```
 
-PostgreSQL bind `127.0.0.1:55432`, có healthcheck và volume riêng. Không đụng
-PostgreSQL khác ở 5432. Nếu host port bận, đổi `POSTGRES_PORT` trong `.env`.
-`init_db` chạy các migration `sql/NNN_*.sql` theo thứ tự và ghi vào
-`public.schema_migrations`, toàn bộ trong transaction, có advisory lock.
-Chạy lại không xóa bảng/volume. Migration `002` mở whitelist product và đổi tên
-`volume_btc` thành `volume_base`, giữ nguyên dữ liệu đã có.
-Không sửa nội dung migration đã áp dụng; thêm migration mới khi đổi schema.
+PostgreSQL binds to `127.0.0.1:55432`, with a healthcheck and a dedicated volume.
+Change `POSTGRES_PORT` if the port is occupied. The migration runner applies
+`sql/NNN_*.sql` in order, records them in `public.schema_migrations`, and uses a
+transaction and advisory lock. Rerunning it preserves existing data. Migration
+`002` expands the supported products and renames `volume_btc` to `volume_base`.
+Add new migrations instead of editing ones already applied.
 
-## Thu thập 180 ngày giá live
+## Collect market prices
 
-Khoảng kiểm chứng cố định: **[2026-05-01, 2026-10-28) UTC**, gồm đúng 180 ngày.
-Truyền rõ cấu hình để kết quả không phụ thuộc khoảng ngày có sẵn trong `.env`:
+The verified demo interval is **[2026-05-01, 2026-10-28) UTC**: 180 completed days.
+Pass the dates explicitly so the run does not depend on values already in `.env`:
 
 ```bash
 START_DATE=2026-05-01 END_DATE=2026-10-28 \
@@ -92,177 +112,114 @@ PRODUCTS=BTC-USD,ETH-USD,SOL-USD REQUEST_CHUNK_DAYS=60 \
 .venv/bin/python -m pipeline.collector
 ```
 
-Với ba sản phẩm và 180 ngày đầy đủ, kết quả là 540 normalized rows. Collector
-kiểm tra coverage từng ngày; product metadata không đủ để kết luận có đủ lịch sử.
-Nếu bỏ cả START_DATE/END_DATE trong env và `.env`, mặc định 180 ngày UTC hoàn tất
-gần nhất. Chỉ đặt một trong hai biến là lỗi. Shell environment ưu tiên `.env`.
+Complete coverage produces 540 normalized rows. The collector checks every day;
+product availability alone does not establish historical coverage. All three
+products returned HTTP 200 and complete coverage in the verified interval.
+Earlier history and access from other networks have not been established.
 
-Nguồn: [Coinbase product candles](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles).
-Giá là daily close trên sàn Coinbase, quote USD, không phải market-wide average.
-Cả ba product đã trả HTTP 200 và có đủ lịch sử **trong khoảng đã kiểm chứng**;
-không suy ra mọi mốc cũ hơn đều được hỗ trợ.
+If both date settings are absent from the shell and `.env`, the collector uses
+the latest 180 completed UTC days. Setting only one boundary is an error.
+Shell environment variables take precedence over `.env`.
 
-- `granularity=86400`; API time là đầu bucket, integer epoch seconds, UTC midnight.
-- API có thể trả ngày ở end hoặc trước start, thứ tự giảm dần. Client lọc `[start,end)`,
-  sắp xếp, từ chối duplicate/missing day hoặc bucket không phải UTC midnight.
-- Mỗi window mặc định 60 ngày; các biên chung không tạo duplicate vì end-exclusive.
-  Tối đa 299 ngày/window để chừa một inclusive-end candle trong mức 300 nến nguồn.
-  Client cho phép tổng range 1..3650 ngày, tách request; không bảo đảm lịch sử sẵn có.
-- Tất cả product/window phải qua validation trước khi commit **một normalized batch**.
-  Bất kỳ window thiếu ngày thì không ghi normalized của toàn bộ run. Các raw attempts
-  đã commit vẫn còn. Không nội suy hoặc dùng fixture để điền thiếu.
-- `HTTP_REQUEST_INTERVAL` mặc định 1 giây, tối thiểu 0.2 giây, giữa các request.
-  [Giới hạn public theo tài liệu](https://docs.cdp.coinbase.com/exchange/rest-api/rate-limits):
-  10 req/s/IP, burst 15; không flood để thử quota. Probe vượt 300 nến thực tế trả 400.
-- Connect/read timeout mặc định 5s/20s; read timeout là socket inactivity, không phải
-  deadline toàn run. Tối đa 3 attempts/request (hard cap 5). Retry timeout, connection
-  error, 408/429/500/502/503/504; không retry TLS certificate errors hoặc permanent 4xx.
-  Exponential backoff, đọc Retry-After; nếu delay vượt budget thì dừng để chạy lại sau.
+### API boundaries and failure handling
 
-## Raw, grain và upsert
+The [Coinbase candles endpoint](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles)
+provides exchange-specific OHLCV, quoted in USD—not a market-wide average.
 
-```text
-Coinbase daily candles (live)
-  → raw.price_fetches (commit mỗi HTTP attempt; body bytes + SHA-256 + metadata)
-  → kiểm tra UTC, shape, completeness, Decimal và OHLC
-  → market.daily_prices (transaction cho toàn bộ run, upsert source/product/day)
-  → synthetic generator đọc snapshot daily closes
-  → synthetic.datasets → synthetic.customers → synthetic.trades
+- Daily requests use `granularity=86400`. Timestamps are integer epoch seconds
+  identifying the start of a UTC bucket.
+- Responses can include the end boundary or candles before the start, in descending
+  order. The client sorts and filters to `[start,end)`, rejecting duplicate days,
+  missing days, unfinished days, and buckets outside UTC midnight.
+- Requests use 60-day windows by default, capped at 299 days to allow for an
+  inclusive-end candle within the provider's 300-candle limit. Total requested
+  ranges can span 1–3,650 days; availability is still validated.
+- Every product/window must pass validation before one normalized batch is
+  committed. Raw attempts are committed separately. Missing candles cause failure;
+  no interpolation or fixture substitution is used.
+- Request pacing defaults to one second, with a minimum of 0.2 seconds. The
+  [documented public limit](https://docs.cdp.coinbase.com/exchange/rest-api/rate-limits)
+  is 10 requests/second/IP with a burst of 15. A live request exceeding 300 candles
+  returned HTTP 400; throttling limits were not tested by flooding the API.
+- Connect/read timeouts default to 5/20 seconds. The read timeout measures socket
+  inactivity, not total run duration. Requests allow three attempts by default,
+  capped at five. Timeouts, connection errors, and HTTP 408/429/500/502/503/504 are
+  retried with bounded backoff and `Retry-After` handling. TLS certificate errors
+  and permanent client errors are not retried. Delays above the wait budget abort
+  the request.
 
-market/synthetic → dbt staging → dimensions/fact → daily/customer marts
-Fixture riêng → PostgreSQL test tmpfs → cùng dbt models; không load fixture vào DB live
-```
+### Storage contracts
 
-Raw grain: một HTTP attempt, PK `fetch_id`, unique `(run_id,attempt_number)`.
-`run_id` nhóm retries **của một request/window**, không phải cả collector invocation.
-Raw lưu endpoint/product/params, start/fetched time UTC, HTTP status, body nguyên
-bytes sau HTTP decompression, SHA-256, transport error và headers allowlist.
-Không lưu authorization/cookie. Transport failure có body/status NULL.
-Nếu JSON/data validation lỗi, raw vẫn tồn tại; nếu database down thì dừng,
-chưa có disk spool. Raw là quy ước append-only trong ứng dụng, chưa phân role riêng.
+| Table | Grain and key | Rerun behavior |
+| --- | --- | --- |
+| `raw.price_fetches` | One HTTP attempt; PK `fetch_id`, unique `(run_id,attempt_number)` | Append another attempt, preserving response history. |
+| `market.daily_prices` | One `(source,product_id,price_date)` | Update OHLCV and lineage on conflict. |
 
-Giá chuẩn hóa grain/key: **(source, product_id, price_date UTC)**.
-`bucket_start` = 00:00 UTC của ngày đã hoàn tất. `ON CONFLICT DO UPDATE` cập nhật
-OHLCV và lineage; lần xử lý commit sau cùng thắng. Chạy collector tuần tự.
-`Decimal` → `NUMERIC` giữ precision; `volume_base` theo base asset.
-`last_fetch_id` và `loaded_at` có thể đổi khi rerun; idempotency giá đo bằng key và
-business values. Raw giữ response history, normalized không giữ version history.
+`run_id` groups retries for **one request/window**, not an entire collector invocation.
+Raw storage includes request parameters, UTC timestamps, HTTP status, decompressed
+body bytes, SHA-256, transport errors, and allowlisted headers. Authorization and
+cookies are excluded. Transport failures have NULL body/status. Raw rows survive
+JSON or data-validation failures. If PostgreSQL is unavailable, collection stops;
+there is no disk spool. Raw append-only behavior is an application convention,
+not a separate database permission boundary.
 
-## Synthetic customers và matched trades
+Normalized `bucket_start` is midnight UTC for a completed day. Python `Decimal`
+and PostgreSQL `NUMERIC` preserve precision; `volume_base` uses the product's base
+asset. The last committed upsert wins, so collectors should run sequentially.
+Idempotency compares keys and business values: `last_fetch_id` and `loaded_at` may
+change. Normalized prices do not retain version history.
 
-Chỉ chạy sau khi có đủ 540 giá live cho khoảng cố định:
+## Generate the synthetic dataset
+
+First collect all 540 prices for the fixed interval, then run:
 
 ```bash
 .venv/bin/python -m pipeline.synthetic \
   --dataset-id portfolio-v1 --seed 20261101 --start 2026-05-01 --end 2026-10-28
 ```
 
-Chạy lại cùng lệnh để kiểm chứng. Không có API trade thật trong dataset này.
-Toàn bộ dữ liệu sinh nằm trong schema **synthetic**, tách khỏi raw/market.
+Generated data lives in the `synthetic` schema, separate from `raw` and `market`.
+Rerun the same command to check reproducibility.
 
-- 1.000 customers: 100 `never`, 600 `regular`, 300 `ceased`. Created_at nằm 1..30
-  ngày trước start; customers được INSERT trước trades, trong cùng transaction.
-- 50.000 trades trạng thái `MATCHED`, BUY/SELL, chia vòng qua 900 customers hoạt động.
-  Mỗi khách hoạt động có 55/56 trades; regular trải đều từ ngày đầu đến ngày cuối
-  (cách nhau tối đa 4 ngày ở bộ 180 ngày), ceased chỉ giao dịch 120 ngày đầu và
-  không giao dịch 60 ngày cuối. Profile là kịch bản sinh dữ liệu, chưa phải churn model.
-- UUID5 từ generator version + dataset_id + entity number; cùng dataset thì IDs ổn định.
-  RNG seed cố định quyết định timestamps, quantity, slippage và created_at.
-- Quantity 0.001000..1.000000 base asset, scale 6. Reference là daily close live của
-  product/ngày đó. Slippage nguyên -25..25 bps. Tất cả tính bằng Decimal:
+- **Customers:** 100 never trade, 600 follow a regular schedule, and 300 cease
+  trading. Creation timestamps precede the start by 1–30 days. Customers are
+  inserted before trades in the same transaction.
+- **Trades:** 50,000 `MATCHED` BUY/SELL executions rotate across 900 customers,
+  giving each 55 or 56 trades. Regular schedules span the full interval with gaps
+  of at most four days; ceased schedules cover the first 120 days, leaving the
+  final 60 days without trades. These are generator scenarios, not churn labels.
+- **Identity:** UUID5 derives from generator version, dataset ID, and entity number.
+  A fixed RNG seed controls timestamps, quantities, slippage, and customer creation.
+- **Amounts:** quantity ranges from 0.001000 to 1.000000 base units. Execution price
+  references that product's daily close with integer slippage from −25 to +25 bps.
+  All monetary arithmetic uses `Decimal`:
 
 ```text
 execution_price = round_half_up(reference_close × (1 + slippage_bps / 10000), 2)
 notional_usd    = round_half_up(quantity × execution_price, 2)
-fee_usd         = round_half_up(notional_usd × 0.001, 2)   # 10 bps, round từng trade
+fee_usd         = round_half_up(notional_usd × 0.001, 2)   # 10 bps, rounded per trade
 ```
 
-**Giả định:** timestamp intraday nhưng execution dựa trên close cùng ngày, có
-look-ahead nếu dùng cho backtest. Chỉ để tạo dữ liệu synthetic; không mô tả đây là
-lịch sử khớp lệnh thực hay dùng đánh giá chiến lược. Không kiểm tra khả năng bán,
-không mô hình hóa funds/inventory, không tính số dư, holdings hay P&L.
+**Assumption:** executions have intraday timestamps but reference the same day's
+close. This introduces look-ahead if used for backtesting. These records are for
+analytics testing, not real execution history or strategy evaluation. Funds,
+inventory, and the ability to sell an asset are not simulated.
 
-`synthetic.datasets` lưu seed/range/version, checksum price inputs và business data.
-Rerun dùng INSERT ON CONFLICT DO NOTHING và đối chiếu toàn bộ business checksum.
-Nếu cùng dataset_id nhưng seed/date/price snapshot/content thay đổi, báo lỗi;
-không tự ghi đè. Dùng dataset_id mới khi chủ đích tạo bộ khác. Giá live cập nhật
-lineage mà close không đổi vẫn cho phép rerun; reference_fetch_id gốc trong trade
-được giữ để truy nguyên. Không tự refresh synthetic theo giá lịch sử đã sửa.
+`synthetic.datasets` records the seed, interval, generator version, price-input
+checksum, and business-content checksum. Inserts use `ON CONFLICT DO NOTHING`,
+followed by full checksum comparison. Changed inputs under the same dataset ID
+are rejected; use a new ID for a different dataset. A new fetch with unchanged
+closing prices is allowed, while original trade lineage is preserved. Corrected
+historical prices do not automatically reprice existing synthetic trades.
 
-FK ràng buộc dataset/customer, market price key và raw fetch provenance; check
-constraints ràng buộc side, status, số dương và các công thức tiền. Customer-time
-ordering và cohort behavior được kiểm tra ở bước verification, chưa có trigger.
-
-## Kiểm chứng và reconciliation fixture
-
-```bash
-.venv/bin/python -m pytest -q
-.venv/bin/python -m pipeline.verify_stage2a --dataset-id portfolio-v1
-docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_2a.sql
-```
-
-Verifier đọc dữ liệu, không ghi; xác minh coverage từng product, checksum synthetic,
-counts, FK, thời gian customer/trade, profiles, công thức giá/notional/phí và raw lineage.
-`sql/verify_2a.sql` có literals cho khoảng kiểm chứng và dataset_id mặc định, trả
-các counters cần bằng 0 cùng totals. SQL minh họa nhanh:
-
-```sql
-SELECT product_id, count(*), min(price_date), max(price_date)
-FROM market.daily_prices
-WHERE price_date >= '2026-05-01' AND price_date < '2026-10-28'
-GROUP BY product_id;
-
-SELECT count(*), sum(notional_usd), sum(fee_usd)
-FROM synthetic.trades WHERE dataset_id = 'portfolio-v1';
-```
-
-Replay **đúng body live đã lưu** hai lần (chọn fetch mới nhất của window/product):
-
-```bash
-.venv/bin/python -m pipeline.verify_idempotency --fetch-id <UUID-response-200>
-```
-
-Replay có ghi upsert normalized; không thêm raw và không gọi API. Script so sánh
-count + OHLCV giữa hai transaction. Không replay fetch cũ đè phiên bản giá mới hơn.
-Bằng chứng hai collector runs và synthetic reruns: [docs/verification.md](docs/verification.md).
-
-Bộ nhỏ [tests/fixtures/reconciliation](tests/fixtures/reconciliation/README.md):
-4 customers, 6 trades, giá hoàn toàn giả, **475.94 USD notional và 0.48 USD phí**.
-Có CSV riêng và expected totals viết rõ theo customer/product/side/date, gồm ca
-rounding 0.055 → 0.06 và 30.075 → 30.08. Source `fixture` không hợp lệ với live
-schema; unit tests chỉ đọc file. Integration tests chạy chính SQL dbt models trên fixture
-ở DB test và đối chiếu expected JSON.
-
-## File chính và vận hành
-
-| File | Vai trò |
-| --- | --- |
-| `AGENTS.md` | Scope hiện tại và quy tắc làm việc |
-| `compose.yaml`, `.env.example` | PostgreSQL và cấu hình local |
-| `pipeline/config.py`, `collector.py` | Window, HTTP retry, raw và điều phối load |
-| `pipeline/normalize.py`, `db.py` | UTC/quality/Decimal và upsert |
-| `pipeline/init_db.py`, `sql/00*.sql` | Migrations không reset dữ liệu |
-| `pipeline/synthetic.py` | Generator, stable IDs và load synthetic |
-| `pipeline/verify_stage2a.py`, `verify_idempotency.py` | Verification, replay |
-| `sql/verify_2a.sql` | SQL kiểm tra coverage, FK, thời gian và totals |
-| `tests/fixtures/reconciliation/` | Dataset nhỏ và expected totals cho reconciliation |
-| `analytics/models/`, `analytics/tests/`, `analytics/macros/` | dbt models, data tests và scope/key macros |
-| `scripts/run_dbt.py`, `scripts/verify_dbt.py`, `compose.test.yaml` | Env wrapper và isolated fixture/migration tests |
-| `docs/models.md`, `sql/verify_2b.sql` | Analytics contract và SQL đối soát demo |
-| `docs/` | Quyết định thiết kế, model contracts và bằng chứng kiểm chứng |
-
-Xem `docker compose ps`, `docker compose logs --tail=100 postgres` khi lỗi.
-Dừng bằng `docker compose stop`, khởi động lại bằng `docker compose up -d --wait`.
-Không xóa volume/data để sửa lỗi. Image khóa major `postgres:16-bookworm`, chưa pin
-image digest; Python khóa direct dependency versions, chưa có transitive lockfile.
-Chưa có scheduler, alerting, run-status table, production roles hoặc kiểm chứng concurrency
-cho collector. Các giới hạn/chưa chạy được ghi trong verification.
+Foreign keys cover dataset/customer, market-price keys, and raw-fetch provenance.
+Check constraints cover side, status, positive amounts, and monetary formulas.
+Customer/trade ordering and schedule behavior are checked by the verifier.
 
 ## dbt analytics
 
-Python hiện có 3.13.5. dbt-postgres 1.11.0 công bố hỗ trợ Python 3.13;
-đã cài và build thực tế thành công với dbt Core 1.11.0 trên máy này.
-Dùng môi trường riêng để không thay dependency collector:
+Use a separate environment to preserve collector dependencies. dbt Core and
+dbt-postgres 1.11.0 were installed and built successfully with Python 3.13.5:
 
 ```bash
 python3 -m venv .venv-dbt
@@ -271,98 +228,147 @@ python3 -m venv .venv-dbt
 .venv-dbt/bin/python -m pip check
 ```
 
-Project/profiles ở `analytics/`, không cần dbt packages bên ngoài. Profile không có
-credentials literal. Wrapper đọc `.env`, giữ ưu tiên shell env và truyền password
-qua DBT_ENV_SECRET_PASSWORD, không qua command arguments.
-DBT_DATABASE mặc định POSTGRES_DB; DBT_SCHEMA mặc định analytics, chỉ được là
-analytics hoặc analytics_* để bảo vệ source schemas. Sources mặc định synthetic/market.
+Project and profiles live in `analytics/`; no external dbt packages are required.
+The wrapper loads `.env`, preserves shell overrides, and passes the password via
+`DBT_ENV_SECRET_PASSWORD`, not command-line arguments. `DBT_DATABASE` defaults to
+`POSTGRES_DB`. Output schemas must be `analytics` or start with `analytics_`;
+source schemas default to `synthetic` and `market`.
 
 ```bash
 .venv/bin/python scripts/run_dbt.py build --vars '{"dataset_id":"portfolio-v1","as_of_date":"2026-10-27"}'
 ```
 
-as_of_date inclusive UTC tới trước 2026-10-28T00:00:00Z, không dùng CURRENT_DATE.
-dataset_id/as_of_date mặc định cố định trong dbt_project.yml, có thể override qua
---vars. Customer/trade chỉ được giữ nếu created_at/traded_at trước hết ngày chốt.
-Một schema chứa một dataset/cutoff snapshot; dùng DBT_SCHEMA=analytics_other_snapshot
-khi muốn giữ snapshot khác song song. Build thay output dbt, không sửa source data.
+The cutoff includes October 27 UTC, ending before `2026-10-28T00:00:00Z`.
+`dataset_id` and `as_of_date` have fixed defaults in `dbt_project.yml`, overridable
+with `--vars`; reports do not depend on `CURRENT_DATE`. Customers and trades must
+exist before the cutoff. Each output schema holds one dataset/cutoff snapshot.
+Use another `DBT_SCHEMA=analytics_*` to retain a separate snapshot. Builds replace
+derived output without modifying sources. The schema guard is not a substitute
+for database permissions; dbt currently uses the local development account.
 
-8 models:
+| Models | Materialization | Grain |
+| --- | --- | --- |
+| `stg_customers` | View | Dataset/customer within the cutoff |
+| `stg_trades` | View | Dataset/trade within the cutoff |
+| `stg_asset_prices` | View | Source/product/UTC price day |
+| `dim_assets` | Table | Source/product |
+| `dim_date` | Table | UTC calendar day |
+| `fact_trades` | Table | Dataset/execution, enriched through complete join keys |
+| `mart_daily_trading` | Table | Dataset/day with at least one trade, across all assets and sides |
+| `mart_customer_summary` | Table | Dataset/customer, including customers without trades |
 
-- stg_customers, stg_trades, stg_asset_prices: views, scope rõ dataset/source/cutoff.
-- dim_assets, dim_date: source/product và calendar UTC.
-- fact_trades: một execution/dataset, LEFT JOIN trên full customer/asset/price keys.
-- mart_daily_trading: một dataset/ngày có trade, tổng mọi asset/side; COUNT DISTINCT
-  trực tiếp theo ngày, không cộng distinct counts từ các nhóm con.
-- mart_customer_summary: giữ cả zero-trade customers; totals zero, dates/recency NULL.
+Trade volume is `SUM(notional_usd)`, **not revenue**. Fees sum amounts already
+rounded per execution. Active-customer counts use `COUNT(DISTINCT customer_id)`
+at the reporting grain and cannot be summed across days, assets, or sides.
 
-Trade volume = SUM(notional_usd), fees = SUM(fee_usd) đã round mỗi trade; không gọi
-volume là revenue. Segment demo: never_traded; active <=30 ngày; at_risk 31..59;
-inactive >=60. Tính từ trades tới cutoff, không SELECT activity_profile của generator.
-Không RFM/churn inference. [Models, columns, grain, keys và lineage](docs/models.md).
+Customer summary uses a LEFT JOIN: customers without trades have zero totals and
+NULL first/last dates and recency. Segments come from trades through the cutoff,
+not the generator's profile: `never_traded`, `active` (≤30 days), `at_risk`
+(31–59 days), and `inactive` (≥60 days). These are demo rules, not RFM or churn inference.
+See [model contracts](docs/models.md) for columns, keys, and lineage.
 
-Demo đã build 8 models + 88 data tests; các tầng khớp 50.000 trades,
-615.063.969,51 USD volume và 615.063,60 USD phí; summary đủ 1.000 customers.
-Daily mart có 116 ngày có trade, không tự thêm zero-trade days.
-Grain đã kiểm tra là (dataset_id,trade_date), không phải ngày × asset × side.
-Regular customers giao dịch cách 3–4 ngày theo hai lịch chung (55/56 trades),
-ceased dùng lịch 55 trades trong 120 ngày đầu. Union lịch regular 91 ngày với
-ceased 55 ngày, trùng 30 ngày → 116 ngày trade và 64 ngày zero-trade.
-Các lịch trong cùng cohort được đồng bộ, nên số ngày hoạt động không đại diện
-cho phân bố khách hàng thực. Asset/side breakdown đọc fact.
+### Why 116 trading days across 180 price days?
+
+The generator synchronizes schedules within cohorts. Regular customers use two
+shared schedules of 55/56 trades, covering 91 distinct days. Ceased customers use
+55 days within the first 120 days. The schedules overlap on 30 days:
+`91 + 55 − 30 = 116` trading days, leaving 64 zero-trade days. This reflects the
+synthetic generator, not customer behavior observed in a real market.
+
+The daily mart keeps only trading days and has no asset/side dimension. Dashboard
+queries use `dim_date` to display zero-trade days and read `fact_trades` for asset
+and side breakdowns.
+
+## Verification and reconciliation
+
+Recorded runs passed **29 Python tests** and a demo dbt build with **8 models and
+88 data tests**. Staging, fact, daily mart, and customer summary reconciled to:
+
+| Metric | Verified demo result |
+| --- | ---: |
+| Trades | 50,000 |
+| Trade volume | USD 615,063,969.51 |
+| Fees | USD 615,063.60 |
+| Distinct active customers across the interval | 900 |
+| Customers retained in the summary | 1,000 |
+| Segments: active / inactive / never traded | 600 / 300 / 100 |
+
+These are synthetic trading totals. API collection, mock-based failure tests,
+and fixture builds are documented separately in [verification](docs/verification.md).
 
 ```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m pipeline.verify_stage2a --dataset-id portfolio-v1
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_2a.sql
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_2b.sql
-.venv/bin/python scripts/run_dbt.py docs generate
-# Tùy chọn mở docs local:
-.venv/bin/python scripts/run_dbt.py docs serve --port 8081
 ```
 
-Truy vấn kiểm tra nhanh:
+Quick SQL checks:
 
 ```sql
+SELECT product_id, count(*), min(price_date), max(price_date)
+FROM market.daily_prices
+WHERE price_date >= '2026-05-01' AND price_date < '2026-10-28'
+GROUP BY product_id;
+
 SELECT count(*), sum(notional_usd), sum(fee_usd) FROM analytics.fact_trades;
 SELECT sum(trade_count), sum(trade_volume_usd), sum(fees_usd) FROM analytics.mart_daily_trading;
 SELECT activity_segment, count(*) FROM analytics.mart_customer_summary GROUP BY 1;
--- Global distinct: không SUM active_customers của daily mart.
+-- Count customers across the whole interval directly from fact.
 SELECT count(DISTINCT customer_id) FROM analytics.fact_trades;
 ```
 
-### Fixture thực thi qua dbt và fresh migration test
+To replay one stored HTTP 200 response in two committed transactions:
+
+```bash
+.venv/bin/python -m pipeline.verify_idempotency --fetch-id <UUID-response-200>
+```
+
+Choose the latest response for its product/window. Replay compares row counts and
+OHLCV, upserts normalized prices, and adds no raw rows or API calls. Replaying an
+older response can overwrite newer price corrections.
+
+### Fixture builds and fresh migrations
+
+The [reconciliation fixture](tests/fixtures/reconciliation/README.md) contains four
+customers, six trades, and fabricated prices. Independent expected totals are
+**USD 475.94 notional and USD 0.48 fees**, grouped by customer/product/side/date.
+Rounding cases include `0.055 → 0.06` and `30.075 → 30.08`.
 
 ```bash
 .venv/bin/python scripts/verify_dbt.py
 ```
 
-Script tự khởi động compose.test.yaml, project de_pj_2b_test, bind 127.0.0.1:55433.
-Test PostgreSQL dùng tmpfs **không mount volume demo**. Có thể đổi TEST_POSTGRES_PORT
-nếu bận; script từ chối dùng cùng port với demo. Tạo database verify_2b_<UUID> mới
-mỗi lần, chạy migrations 001/002 và rerun, rồi load CSV vào fixture_input (không
-write market/synthetic). Không gọi API, không tạo 50k trades mới, không xóa DB/volume.
+The script starts `compose.test.yaml` under project `de_pj_2b_test`, on loopback
+port 55433. PostgreSQL uses tmpfs and **does not mount the demo volume**. Set
+`TEST_POSTGRES_PORT` if needed; the script rejects the demo port. Each run creates
+`verify_2b_<UUID>`, applies migrations 001/002 twice, and loads CSV into
+`fixture_input`. It does not write fixtures to demo `market`/`synthetic`, call the
+price API, or regenerate the 50,000 trades.
 
-Chạy chính 8 models/88 tests ở 4 cutoffs: 2026-05-03, 2026-05-01, 2026-06-02,
-2026-07-02. Đối chiếu expected_totals.json ở baseline bằng SQL trên output dbt
-cho global/customer/product/side/date; kiểm tra row-level money, daily active [1,1,2],
-LEFT JOIN zero-trade, cutoff và recency 30/31/60. Thêm distractor dataset cùng UUID,
-provider khác cùng pair/day và future rows để kiểm tra fan-out/scope.
+The same eight models and 88 tests run at four cutoffs: 2026-05-03, 2026-05-01,
+2026-06-02, and 2026-07-02. Output SQL queries check expected JSON totals,
+row-level amounts, daily distinct counts `[1,1,2]`, zero-trade customers, future
+rows, and recency boundaries. Distractor rows reuse UUIDs in another dataset or
+product/day keys under another provider to expose incomplete joins.
 
-Test DB/container được giữ để review; logs, manifest và run_results nằm trong ignored
-data/verify_2b_*/. tmpfs chỉ là dữ liệu test tạm, không phải persistence/backup của demo.
-Collector .venv và nguồn demo được giữ; source checksums được so sánh trước/sau.
-Chưa đưa tests vào CI. analytics/target, analytics/logs và .venv-dbt được Git ignore.
+Demo-source checksums are compared before and after. Test databases are retained
+for inspection; tmpfs is temporary test storage, not a backup. Logs and artifacts
+are ignored under `data/verify_2b_*/`. Unit tests use mocks/in-memory inputs;
+fixture builds exercise actual dbt SQL. Neither substitutes for live API evidence.
 
-## Metabase dashboard
+Generate dbt documentation locally:
 
-Truy cập **http://localhost:3000/dashboard/2** trên máy hiện tại. Khi tái tạo ở
-metadata DB mới, ID có thể khác: setup script in URL thực tế và lưu data/metabase-state.json.
-Dashboard: **Investment Pipeline | Synthetic Trading**. Nhãn trên dashboard ghi rõ
-synthetic customers/executions, Coinbase daily-close reference, portfolio-v1 và cutoff
-2026-10-27 UTC. Không gọi trade volume là revenue.
+```bash
+.venv/bin/python scripts/run_dbt.py docs generate
+# Optional local documentation server:
+.venv/bin/python scripts/run_dbt.py docs serve --port 8081
+```
 
-### Setup và tái tạo
+## Metabase setup
 
-Dữ liệu analytics phải có sẵn. Với clone mới cần chạy các bước collector,
-synthetic và dbt ở trên trước; Git không chứa database/volume của máy hiện tại.
+Run collection, synthetic generation, and dbt first. A clone contains code and
+fixtures, not the local database or volumes.
 
 ```bash
 .venv/bin/python scripts/init_metabase_env.py
@@ -372,84 +378,118 @@ docker compose up -d --wait metabase
 .venv/bin/python scripts/verify_metabase.py
 ```
 
-init_metabase_env chỉ tạo secret còn thiếu/placeholder và giữ giá trị đã có,
-không tự rotate password/encryption key. POSTGRES_PASSWORD phải được cấu hình
-như phần setup; secrets Metabase riêng được sinh tự động vào .env mode 0600.
-Đăng nhập bằng METABASE_ADMIN_EMAIL (mặc định admin@investment.local) và
-METABASE_ADMIN_PASSWORD trong .env; mở file bằng editor để xem, không đưa vào Git.
-Đây là local administrator của ứng dụng, khác với database query user.
+The setup script prints the dashboard URL and writes `data/metabase-state.json`.
+On the development machine it is **http://localhost:3000/dashboard/2**; IDs can
+change with a fresh metadata database.
 
-Image metabase/metabase:v0.64.1 đã kiểm tra manifest có linux/arm64 và đã chạy native
-arm64 trên máy này. App bind loopback 3000; có thể đổi METABASE_PORT nếu bận.
-Không sửa ports/services/volumes cũ. metabase_db là PostgreSQL metadata riêng,
-không publish host port, dùng named volume metabase_metadata. Không dùng H2.
-Metabase kết nối business DB qua postgres:5432 trong Compose network bằng
-**metabase_reader**, không dùng investment/owner. Role chỉ có analytics SELECT,
-không có UPDATE/INSERT/DELETE/TRUNCATE/schema CREATE; default privileges giữ SELECT
-cho bảng/view do cùng dbt owner tạo mới. Setup role cần chạy bằng owner local,
-nhưng dashboard query connection chỉ lưu reader credentials.
+Log in with `METABASE_ADMIN_EMAIL` (default `admin@investment.local`) and
+`METABASE_ADMIN_PASSWORD` from `.env`. The environment initializer fills only
+missing/placeholder values, preserves existing credentials, and sets `.env` to
+mode 0600. The UI administrator is separate from the database query user.
 
-Giữ .env cùng METABASE_ENCRYPTION_KEY và metadata volume để có thể đọc lại database
-credentials đã mã hóa. Không xóa/reset volume để xử lý login hoặc startup lỗi.
-Các lệnh setup tái chạy update đúng collection/cards/dashboard theo tên, không nhân
-bản project dashboard. Script quản lý layout và nội dung này; thay SQL trong repo
-rồi chạy lại setup sẽ cập nhật cards tương ứng. Metabase API không versioned;
-script đã kiểm tra với OpenAPI của chính container v0.64.1.
+The pinned application tag is `metabase/metabase:v0.64.1`, verified to run natively
+on arm64. It binds to loopback port 3000, configurable with `METABASE_PORT`.
+`metabase_db` is a separate PostgreSQL service with the `metabase_metadata` named
+volume and no published host port. Application metadata does not use H2.
 
-### Cards và filters
+The business-database connection uses **`metabase_reader`**, through
+`postgres:5432` on the Compose network. The role has analytics SELECT access and
+no table write or schema CREATE privileges. Default privileges preserve SELECT
+on new relations created by the same dbt owner. Role setup uses the local owner;
+dashboard queries use only reader credentials.
 
-SQL của 9 cards ở metabase/cards/*.sql:
+Retain `.env`, `METABASE_ENCRYPTION_KEY`, and the metadata volume together so
+Metabase can decrypt saved database credentials. Setup updates the named
+collection, cards, and dashboard on rerun. Edit card SQL and rerun setup to update
+the dashboard. Metabase's API is unversioned; provisioning was verified against
+the running v0.64.1 container's OpenAPI specification.
 
-- Bốn KPI: trade volume USD, fees USD, matched trades, distinct active customers.
-- Hai biểu đồ ngày: volume và fees; LEFT JOIN dim_date để đủ 180 ngày, có 64 ngày zero.
-- Stacked bar volume theo asset và BUY/SELL, query fact; không đổi grain daily mart.
-- Customer segments và bảng top 15 khách theo tổng phí: snapshot cố định 2026-10-27.
+### Cards and filter scope
 
-From/To là ngày UTC inclusive, mặc định 2026-05-01/2026-10-27; asset BTC/ETH/SOL
-mặc định tất cả. Filters chỉ nối vào 7 trading cards. Distinct customers được tính
-trực tiếp từ fact ở phạm vi đã lọc, không cộng distinct theo ngày/tài sản/side.
-Calendar padding lọc trades trước LEFT JOIN; không đặt asset filter ở WHERE sau join
-vì sẽ làm mất zero-trade days. Range demo luôn giới hạn trong 180 ngày dữ liệu.
+Nine SQL cards are stored in `metabase/cards/`:
 
-Hai customer cards không có template tags hay filter mappings. Chúng giữ đủ 1.000
-khách tại cutoff, kể cả khi chọn tháng 6/ETH; đây không phải customer segmentation
-được tính lại theo asset hoặc date filter. Muốn đổi cutoff snapshot phải dbt build
-với cấu hình mới và sửa dashboard contract có chủ đích; dashboard này không giả lập
-snapshot mới bằng filter trên snapshot cũ.
+- Four KPIs: trade volume, fees, trade count, and distinct active customers.
+- Two daily charts: volume and fees, padded to 180 days using `dim_date`.
+- A stacked volume chart by asset and BUY/SELL, queried from fact.
+- Customer segments and the top 15 customers by fees, fixed at the cutoff.
 
-### Kiểm chứng và ảnh thật
+From/To are inclusive UTC dates, defaulting to May 1–October 27, 2026. Asset
+options are BTC/ETH/SOL, with all selected by default. These filters map only to
+the seven trading cards. Customer counts come directly from filtered fact.
+Trades are filtered before the calendar LEFT JOIN so zero-trade days remain.
+The dashboard range is bounded by the demo interval.
+
+The two customer cards have no template tags or filter mappings. They retain the
+1,000-customer snapshot even when June/ETH is selected. Changing the snapshot
+cutoff requires a dbt build and an explicit dashboard-contract update.
+
+### Dashboard verification
 
 ```bash
 .venv/bin/python scripts/verify_metabase.py
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_3.sql
-# Persistence: không xóa hoặc recreate metadata volume.
+# Restart the application without removing the metadata volume.
 docker compose restart metabase
 docker compose up -d --wait metabase
 .venv/bin/python scripts/verify_metabase.py
 ```
 
-Verifier gọi các cards thật qua Metabase API, so với SQL bound độc lập trên PostgreSQL
-bằng reader role; kiểm tra toàn bộ 180/30 daily rows, asset/side totals, top 15, segments,
-filter mappings và UPDATE bị ACL từ chối ngay cả khi tắt transaction_read_only.
-Đã so dashboard/card IDs, SQL, filter definitions và visualization settings trước/sau restart.
+The verifier queries saved cards through Metabase and compares results with
+independent parameterized SQL using the reader role. It checks daily rows,
+asset/side totals, customer rankings, segments, filter mappings, and ACL rejection
+of UPDATE even with transaction read-only disabled. Dashboard/card IDs, SQL,
+filters, and visualization settings were also compared before and after restart.
 
-| Phạm vi trade filters | Trades | Volume USD | Fees USD | Distinct customers |
+| Trading filters | Trades | Volume USD | Fees USD | Distinct customers |
 | --- | ---: | ---: | ---: | ---: |
-| Mặc định | 50000 | 615063969.51 | 615063.60 | 900 |
-| 2026-06-01..2026-06-30 | 9300 | 100591957.72 | 100591.72 | 900 |
-| ETH, toàn kỳ | 16667 | 17344749.48 | 17345.27 | 300 |
-| Tháng 6 + ETH | 3100 | 2633325.78 | 2633.37 | 300 |
+| Default interval | 50,000 | 615,063,969.51 | 615,063.60 | 900 |
+| June 1–30 | 9,300 | 100,591,957.72 | 100,591.72 | 900 |
+| ETH, full interval | 16,667 | 17,344,749.48 | 17,345.27 | 300 |
+| June + ETH | 3,100 | 2,633,325.78 | 2,633.37 | 300 |
 
-Ảnh chụp **UI thật, không mock**, ở viewport hẹp của in-app browser, chỉ thể hiện
-phần dashboard đang thấy; không phải ảnh ghép toàn bộ dashboard desktop:
+Additional screenshots from the in-app browser show
 [default volume/fees](docs/screenshots/metabase-default-kpis.jpg),
-[default trade/customer counts](docs/screenshots/metabase-default-counts.jpg),
-[tháng 6 + ETH](docs/screenshots/metabase-june-eth.jpg).
+[default trade/customer counts](docs/screenshots/metabase-default-counts.jpg), and
+[June + ETH](docs/screenshots/metabase-june-eth.jpg).
+They capture the visible narrow viewport, not a full desktop dashboard.
+Date/asset controls were exercised in that browser; desktop Chrome/Safari layout
+was not independently verified by the agent. SMTP, email password reset, and
+public dashboard sharing are not configured.
 
-Provisioning script tạo sẵn cards, layout và filter mappings. Mở URL được script
-in ra, đăng nhập bằng credentials trong .env. Date/asset filters đã được kiểm tra
-qua API và in-app browser; layout desktop Chrome/Safari chưa được agent kiểm chứng.
-Chưa cấu hình SMTP, password reset qua email hoặc public dashboard sharing.
+## Repository guide
 
-Tài liệu [verification](docs/verification.md) ghi bằng chứng và phần chưa chạy;
-Airflow, CI, AI, RFM và retention nằm ngoài phạm vi triển khai.
+| Path | Purpose |
+| --- | --- |
+| `pipeline/config.py`, `pipeline/collector.py` | Date windows, HTTP retries, raw capture, and load coordination |
+| `pipeline/normalize.py`, `pipeline/db.py` | UTC validation, Decimal parsing, and upserts |
+| `pipeline/init_db.py`, `sql/00*.sql` | Additive, rerunnable migrations |
+| `pipeline/synthetic.py` | Seeded generation, stable IDs, and dataset guards |
+| `pipeline/verify_stage2a.py`, `pipeline/verify_idempotency.py` | Source checks and raw-response replay |
+| `analytics/models/`, `analytics/tests/`, `analytics/macros/` | dbt transformations, data tests, and key/scope macros |
+| `scripts/run_dbt.py`, `scripts/verify_dbt.py`, `compose.test.yaml` | dbt environment wrapper and isolated integration checks |
+| `metabase/cards/`, `scripts/setup_metabase*.py` | Dashboard SQL, provisioning, and reader-role setup |
+| `scripts/verify_metabase.py`, `sql/verify*.sql` | API-to-SQL checks and independent reconciliation queries |
+| `tests/fixtures/reconciliation/` | Small fixture and independent expected totals |
+| `compose.yaml`, `.env.example` | Services and environment configuration |
+| `docs/` | Design decisions, model contracts, and verification records |
+| `AGENTS.md` | Repository working rules |
+
+## Operations and limitations
+
+Use `docker compose ps` and `docker compose logs --tail=100 postgres` to inspect
+failures. Stop with `docker compose stop`; resume with `docker compose up -d --wait`.
+Do not delete volumes or data to resolve startup errors.
+
+- PostgreSQL uses `postgres:16-bookworm`, without a pinned digest. Python direct
+  dependencies are pinned; there is no transitive dependency lockfile.
+- No scheduler, CI, alerting, or pipeline run-status table is implemented. Collection
+  and dbt builds are sequential local operations; concurrency and production load
+  have not been tested.
+- Isolated fresh migrations and fixture builds were tested. A complete pipeline
+  run from an empty clone, backup/restore, metadata-database restart, and failure
+  recovery have not been verified.
+- dbt tables require rebuilding after source updates. Incremental models,
+  historical snapshots, SCD2, retention, RFM scoring, and AI agents are outside
+  the current implementation.
+
+See [verification](docs/verification.md) for executed checks and remaining gaps.
