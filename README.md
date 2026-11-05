@@ -10,8 +10,8 @@ and customer activity summaries.
 
 **Stack:** Python, PostgreSQL, dbt Core, Metabase, Docker Compose, and optional
 Airflow orchestration. Daily price ingestion can run on a schedule; the fixed
-analytics demo is built manually. GitHub Actions checks are configured; hosted
-execution is pending publication of the workflow.
+analytics demo is built manually. GitHub Actions checks are verified on hosted
+Ubuntu runners; see the CI verification link below.
 The project does not model balances, holdings, or P&L.
 
 ## Dashboard preview
@@ -485,10 +485,10 @@ Do not delete volumes or data to resolve startup errors.
 
 - PostgreSQL uses `postgres:16-bookworm`, without a pinned digest. Python direct
   dependencies are pinned; there is no transitive dependency lockfile.
-- Airflow schedules price ingestion locally. CI is configured but not yet verified
-  on GitHub-hosted runners. Alerting and a business run-status table are not
-  implemented. Backfill/manual collection must remain
-  sequential; external concurrent writes and production load have not been tested.
+- Airflow schedules price ingestion locally; GitHub Actions verifies code and
+  fixture models. Alerting and a business run-status table are not implemented.
+  Backfill/manual collection must remain sequential; external concurrent writes
+  and production load have not been tested.
 - Isolated fresh migrations and fixture builds were tested. A complete pipeline
   run from an empty clone, backup/restore, metadata-database restart, and failure
   recovery have not been verified.
@@ -683,7 +683,8 @@ docker run --rm --network none -e AIRFLOW__CORE__LOAD_EXAMPLES=false -i --entryp
 
 Local verification passed 52 Python tests on macOS Python 3.13 and in Linux Python
 3.12, all four fixture builds (96 successful nodes each), the schema guard, and
-offline DAG parsing. `actionlint` also passed. **The GitHub-hosted workflow has not
-run yet**: the workflow is not committed/pushed. After publishing it, inspect the
-Actions tab and the job artifacts before treating hosted CI as verified. Branch
+offline DAG parsing. `actionlint` also passed. The [first GitHub-hosted run](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42075415267)
+passed all four jobs on Ubuntu 24.04 for commit `2249420`. Downloaded artifacts
+confirmed 52 tests on each Python version and 96 successful dbt nodes at each
+fixture cutoff, including the independent totals and schema guard. Branch
 protection and required status checks have not been configured.

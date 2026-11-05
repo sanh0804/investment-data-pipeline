@@ -1,7 +1,8 @@
 # Stage 4B — GitHub Actions checks
 
-Status: implemented and verified locally; hosted Actions execution awaits a
-user-authorized commit/push.
+Status: implemented and verified locally and on GitHub-hosted runners.
+[Hosted run](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42075415267) passed for commit `2249420`;
+see docs/verification.md for artifact checks and remaining limitations.
 
 Scope: offline unit tests, fresh migrations and dbt fixture reconciliation, and
 Airflow DAG parsing. No deployment, live Coinbase access, demo data generation,

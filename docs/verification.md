@@ -786,3 +786,35 @@ Compose CI config --quiet và git diff --check pass. Staged area rỗng.
   hoặc digest pin cho PostgreSQL/Python reproduction images.
 - Chưa deploy, auto-refresh dbt/synthetic, AI/RFM/retention/SCD2 hay tính năng mới.
   Dừng sau4B để review; các thay đổi4A/4B chưa commit hoặc push.
+
+
+## GitHub-hosted CI — kiểm chứng sau push, 2026-11-06
+
+Theo yêu cầu user đã rà staged diff, secrets/artifacts, chạy lại52 unit tests và
+actionlint thành công, rồi commit4A/4B thành `2249420` và push origin/main bằng
+tài khoản sanh0804. Không force-push, không thêm .env hoặc notes cá nhân. Plan4A
+được đồng bộ đường dẫn thực tế orchestration/ trước commit.
+
+Run [42075415267](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42075415267) được tạo bởi push
+cho SHA `2249420fa7057276e077ac875f905c895b665356`, conclusion=success.
+Bốn jobs trên ubuntu-24.04 đều thành công:
+
+| Hosted job | Bằng chứng |
+| --- | --- |
+| Python3.12 tests | JUnit artifact:52 tests,0 failures/errors/skips |
+| Python3.13 tests | JUnit artifact:52 tests,0 failures/errors/skips |
+| Fresh migrations and dbt reconciliation | Bốn cases đều96 nodes success; schema guard pass |
+| Airflow DAG import and contract | Build image và parse với network=none thành công |
+
+Đã tải và đọc artifacts unit-python-3.12, unit-python-3.13 và dbt-fixture-results.
+Hosted DB `ci_verify_b47f6926d69e`; report passed=true/schema_guard_passed=true.
+Baseline giữ4 customers/6 trades, totals475.94 USD notional và0.48 USD fees; mọi
+groups và daily active[1,1,2] khớp. Đọc cả bốn run_results.json: mỗi file96 nodes,
+chỉ status success/pass. Artifact upload và download đã kiểm chứng thực tế.
+Bằng chứng local tải về ở ignored data/github-ci-42075415267/.
+
+README và plan4B cập nhật hosted status. Các dòng “chưa push/chưa hosted” ở phần
+trước là lịch sử trước lần xuất bản này. Hosted CI kiểm tra code/fixtures/DAG
+imports, không thay thế bằng chứng live collection hoặc Airflow browser UI.
+Chưa thử fork PR, manual dispatch, cancellation, branch protection/required checks
+hoặc deployment. Không mở rộng scope ngoài4A/4B.
