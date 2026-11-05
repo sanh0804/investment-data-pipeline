@@ -239,3 +239,72 @@ reference prices. Không dùng AI, public sharing, SMTP hoặc scheduled subscri
 SQL và API checks đối chiếu dữ liệu cards; kiểm tra UI bổ sung việc chọn filters
 và đọc kết quả hiển thị. Ảnh lưu viewport thật trong in-app browser. Phạm vi kiểm
 chứng layout không bao gồm desktop Chrome/Safari; chi tiết ở verification.md.
+
+## Airflow orchestration
+
+LocalExecutor phù hợp workload tuần tự và tránh thêm Redis/Celery. Dùng Compose
+overlay để base services không phụ thuộc cấu hình Airflow. API, scheduler,
+DAG processor và PostgreSQL metadata riêng chạy bằng image arm64; pin Airflow
+3.3.2/Python 3.12 và lưu upstream constraints trong repo. Dependencies của
+collector trên host giữ nguyên; trong image dùng versions khớp constraints.
+
+DAG dùng CronDataIntervalTimetable explicit UTC, không dựa mặc định thay đổi theo
+version. Scheduled/backfill xử lý đúng một ngày; manual phải truyền start/end và
+chỉ cho phép tối đa bảy ngày. Collector nhận dates bằng arguments, không sửa
+process environment hoặc lấy ngày từ .env. Ngày thu thập là data interval,
+không phải ngày task thực thi. Catchup tắt, DAG tạo ở trạng thái paused.
+
+Giữ cả ba product trong một task để bảo toàn transaction boundary. Bước verify
+đọc raw bodies theo fetch IDs trả về sau commit, kiểm tra checksum và đối chiếu
+đủ values/keys/lineage. Không truyền raw vào XCom; không thêm status table nghiệp vụ.
+Một slot pool và run limits phục vụ vận hành tuần tự; không coi đó là distributed
+lock cho CLI hoặc các nguồn ghi khác. Không chạy backfill chồng manual reprocessing.
+
+Backfill lấp run/day thiếu; reprocessing chủ động chạy lại ngày đã có và có thể
+nhận price corrections. Retry HTTP và retry task có budget riêng; permanent
+errors fail ngay, missing candle/transient failures được retry hữu hạn. Demo
+portfolio-v1 và dbt/customer snapshot giữ nguyên, không tự sinh trades hay build
+analytics khi market cập nhật.
+
+SimpleAuthManager chỉ dành local development; tạo trước file auth trên volume
+để tránh in generated passwords. Init chạy root chỉ cho ownership của thư mục
+mới, còn runtime chạy airflow user. Scoped collector role chỉ ghi raw/market.
+Các DAG fault-injection nằm trong verification image riêng, HTTP mocks và
+PostgreSQL tmpfs riêng; không gắn test flag vào production DAG.
+
+Nguồn: [Airflow Docker](https://airflow.apache.org/docs/apache-airflow/3.3.2/howto/docker-compose/),
+[timetables](https://airflow.apache.org/docs/apache-airflow/3.3.2/authoring-and-scheduling/timetable.html),
+[SimpleAuthManager](https://airflow.apache.org/docs/apache-airflow/3.3.2/core-concepts/auth-manager/simple/index.html).
+
+## CI — tests và fixture reconciliation
+
+Workflow tách unit matrix Python3.12/3.13, dbt fixture PostgreSQL16, và Airflow DAG
+parse. Không dựng toàn bộ Airflow/Metabase trong CI: orchestration runtime đã có
+bằng chứng local, còn CI cần phát hiện lỗi code/model và DAG import nhanh, không
+phụ thuộc API public hay dataset live.
+
+Tạo entry point verify_ci riêng để không đưa Compose/demo snapshot dependencies
+của verify_dbt vào hosted runner. Chia sẻ loader và các assertions hiện có; không
+fork SQL models hoặc expected totals. Migration runner tách apply_migrations(conn)
+để dùng cùng logic trên connection test tường minh. Wrapper dbt có chế độ không
+load .env; CI truyền đủ credentials qua env của database riêng.
+
+Dùng PostgreSQL service user ci_runner/database investment_ci và tạo ci_verify_UUID
+mới; password public chỉ dùng cho service tạm, không phải secret nghiệp vụ.
+Không dùng secret trên Mac hoặc GitHub repository secrets. Reproduction Compose
+có project/network/tmpfs riêng, port55434; runner chỉ mount artifact volume riêng.
+Docker context allowlist không chứa .env, .git, host virtualenv hoặc dbt targets.
+
+Mỗi cutoff chạy cùng 8 models/88 tests rồi so SQL output với oracle JSON và fixture
+rows. Compile schema market phải fail với thông báo guard, không chỉ do connection
+lỗi. Airflow check dùng DagBag API của pinned3.3.2 và network=none; không tuyên bố
+parse check kiểm chứng scheduler, retry hay live HTTP.
+
+Actions pin full commit SHAs, checkout không lưu Git credentials, token contents:read,
+PR dùng pull_request thay vì pull_request_target. Artifacts whitelist và timeout/
+concurrency limits giúp xem lỗi mà không upload workspace/local secrets. Chưa bật
+branch protection hoặc publish workflow chỉ để có badge xanh.
+
+Tham khảo: [PostgreSQL service containers](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-postgresql-service-containers),
+[Python workflows](https://docs.github.com/en/actions/tutorials/build-and-test-code/python),
+[dbt secret env vars](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var).

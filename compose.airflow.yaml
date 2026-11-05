@@ -1,0 +1,125 @@
+# Opt in with: docker compose -f compose.yaml -f compose.airflow.yaml ...
+x-airflow-common: &airflow-common
+  image: de-pj-airflow:3.3.2-python3.12
+  build:
+    context: .
+    dockerfile: orchestration/Dockerfile
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__PARALLELISM: '2'
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '1'
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: UTC
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW_LOCAL_ADMIN_USER:?Initialize Airflow env}:admin
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/auth/passwords.json
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow_meta:${AIRFLOW_METADATA_PASSWORD:?Initialize Airflow env}@airflow_metadata/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Initialize Airflow env}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow_api:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?Initialize Airflow env}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: '5432'
+    POSTGRES_DB: ${POSTGRES_DB:?Configure business database}
+    POSTGRES_USER: airflow_collector
+    POSTGRES_PASSWORD: ${AIRFLOW_COLLECTOR_PASSWORD:?Initialize Airflow env}
+    PRODUCTS: BTC-USD,ETH-USD,SOL-USD
+    REQUEST_CHUNK_DAYS: '60'
+    HTTP_MAX_ATTEMPTS: '3'
+    HTTP_REQUEST_INTERVAL: '1'
+  volumes:
+    - airflow_logs:/opt/airflow/logs
+    - airflow_auth:/opt/airflow/auth
+  depends_on: &airflow-depends
+    airflow_metadata:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  airflow_metadata:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow_meta
+      POSTGRES_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:?Initialize Airflow env}
+      TZ: UTC
+    volumes:
+      - airflow_metadata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U airflow_meta -d airflow']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  airflow_init:
+    <<: *airflow-common
+    restart: 'no'
+    user: '0:0'
+    entrypoint: /bin/bash
+    environment:
+      <<: *airflow-env
+      AIRFLOW_LOCAL_ADMIN_USER: ${AIRFLOW_LOCAL_ADMIN_USER}
+      AIRFLOW_LOCAL_ADMIN_PASSWORD: ${AIRFLOW_LOCAL_ADMIN_PASSWORD:?Initialize Airflow env}
+    # New named volumes start root-owned; only initialization needs root.
+    command:
+      - -ec
+      - >-
+        chown 50000:0 /opt/airflow/auth /opt/airflow/logs;
+        chmod 770 /opt/airflow/auth /opt/airflow/logs;
+        exec su airflow -s /bin/bash -c 'python /opt/project/initialize.py &&
+        airflow db migrate && airflow pools set coinbase_serial 1 "Sequential Coinbase collection"'
+
+
+  airflow_api:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:${AIRFLOW_PORT:-8081}:8080"
+    depends_on:
+      <<: *airflow-depends
+      airflow_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, 'http://localhost:8080/api/v2/monitor/health']
+      interval: 20s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  airflow_scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-depends
+      airflow_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, 'http://localhost:8974/health']
+      interval: 20s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  airflow_dag_processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      <<: *airflow-depends
+      airflow_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD-SHELL, 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  airflow_metadata:
+  airflow_logs:
+  airflow_auth:

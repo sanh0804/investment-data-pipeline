@@ -53,3 +53,13 @@ def test_missing_other_product_never_writes_first_product(monkeypatch):
     with pytest.raises(ValueError, match="ETH-USD.*Incomplete"):
         collect(Mock(), Mock(), settings)
     write_mock.assert_not_called()
+
+
+def test_malformed_json_keeps_validation_exception_and_never_upserts(monkeypatch):
+    settings = Settings(date(2026,5,1),date(2026,5,2),1,2,1,0,30)
+    monkeypatch.setattr("pipeline.collector.fetch", Mock(return_value=("malformed",b"{")))
+    write = Mock()
+    monkeypatch.setattr("pipeline.collector.upsert",write)
+    with pytest.raises(ValueError, match="BTC-USD"):
+        collect(Mock(),Mock(),settings)
+    write.assert_not_called()

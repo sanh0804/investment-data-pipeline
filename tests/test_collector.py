@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from pipeline.collector import fetch, retry_delay
+from pipeline.collector import fetch, retry_delay, FetchFailure
 from pipeline.config import Settings, load_settings
 
 SETTINGS = Settings(date(2026, 10, 25), date(2026, 10, 26), 1, 2, 3, 0, 30)
@@ -52,8 +52,9 @@ def test_retry_budget_is_bounded(monkeypatch):
     monkeypatch.setattr("pipeline.collector.time.sleep", lambda seconds: None)
     conn, session = connection(), Mock()
     session.get.return_value = response(503)
-    with pytest.raises(RuntimeError, match="Live API fetch failed"):
+    with pytest.raises(FetchFailure, match="Live API fetch failed") as error:
         fetch(conn, session, SETTINGS)
+    assert error.value.retryable is True
     assert session.get.call_count == conn.execute.call_count == 3
 
 
@@ -64,8 +65,9 @@ def test_permanent_failures_are_not_retried(failure):
         session.get.side_effect = failure
     else:
         session.get.return_value = failure
-    with pytest.raises(RuntimeError):
+    with pytest.raises(FetchFailure) as error:
         fetch(conn, session, SETTINGS)
+    assert error.value.retryable is False
     assert session.get.call_count == conn.execute.call_count == 1
 
 

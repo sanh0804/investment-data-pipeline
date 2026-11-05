@@ -1,0 +1,2 @@
+FROM de-pj-airflow:3.3.2-python3.12
+COPY --chown=airflow:root orchestration/tests /opt/airflow/dags/verification

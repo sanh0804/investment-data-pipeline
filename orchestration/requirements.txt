@@ -1,0 +1,5 @@
+# Match the selected Airflow image's constraints; collector host pins stay separate.
+apache-airflow==3.3.2
+requests==2.34.2
+psycopg[binary]==3.3.5
+python-dotenv==1.2.3

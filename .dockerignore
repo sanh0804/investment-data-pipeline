@@ -1,0 +1,7 @@
+*
+!orchestration/
+!orchestration/**
+!pipeline/
+!pipeline/**
+**/__pycache__/
+**/*.pyc

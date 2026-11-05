@@ -11,10 +11,16 @@ from psycopg.types.json import Jsonb
 
 from pipeline.config import PRODUCT, SOURCE, date_windows, endpoint, load_settings
 from pipeline.db import connect, upsert
-from pipeline.normalize import normalize
+from pipeline.normalize import normalize, IncompleteResponse
 
 RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 KEPT_HEADERS = {"content-type", "date", "retry-after", "etag", "cache-control"}
+
+
+class FetchFailure(RuntimeError):
+    def __init__(self, message, *, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def retry_delay(header, attempt, settings):
@@ -85,7 +91,8 @@ def fetch(conn, session, settings, product=PRODUCT, start=None, end=None):
             return fetch_id, body
         transient = transient or status in RETRY_STATUSES
         if not transient or attempt == settings.max_attempts:
-            raise RuntimeError(f"Live API fetch failed: status={status}, error={error}; raw fetch_id={fetch_id}")
+            raise FetchFailure(f"Live API fetch failed: status={status}, error={error}; raw fetch_id={fetch_id}",
+                               retryable=transient)
         time.sleep(max(settings.request_interval, retry_delay(headers.get("retry-after"), attempt, settings)))
     raise RuntimeError("No successful API response")
 
@@ -102,7 +109,8 @@ def collect(conn, session, settings):
             try:
                 candles = normalize(body, start, end)
             except ValueError as exc:
-                raise ValueError(f"{product} [{start},{end}) fetch_id={fetch_id}: {exc}") from exc
+                error_type = IncompleteResponse if isinstance(exc, IncompleteResponse) else ValueError
+                raise error_type(f"{product} [{start},{end}) fetch_id={fetch_id}: {exc}") from exc
             batches.append((product, candles, fetch_id))
     # All requested products/windows must pass before any normalized write.
     with conn.transaction():
@@ -111,7 +119,8 @@ def collect(conn, session, settings):
     return {"result": "live_collection_succeeded", "products": settings.products,
             "normalized_rows": sum(len(c) for _, c, _ in batches),
             "requests_succeeded": len(batches), "start": str(settings.start),
-            "end_exclusive": str(settings.end)}
+            "end_exclusive": str(settings.end),
+            "fetch_ids": [str(fetch_id) for _, _, fetch_id in batches]}
 
 
 def main():

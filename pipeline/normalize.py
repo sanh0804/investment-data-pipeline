@@ -4,6 +4,10 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 
+class IncompleteResponse(ValueError):
+    """A valid response is missing requested daily buckets."""
+
+
 @dataclass(frozen=True)
 class Candle:
     bucket_start: datetime
@@ -50,5 +54,5 @@ def normalize(body: str | bytes, start: date, end: date) -> list[Candle]:
     expected = {start + timedelta(days=i) for i in range((end - start).days)}
     if set(candles) != expected:
         missing = sorted(expected - set(candles))
-        raise ValueError(f"Incomplete response; missing UTC days: {missing}")
+        raise IncompleteResponse(f"Incomplete response; missing UTC days: {missing}")
     return [candles[day] for day in sorted(candles)]

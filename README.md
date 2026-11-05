@@ -8,8 +8,10 @@ execution data—**1,000 customers and 50,000 matched trades—are entirely synt
 They provide a controlled dataset for testing aggregations, monetary calculations,
 and customer activity summaries.
 
-**Stack:** Python, PostgreSQL, dbt Core, Metabase, and Docker Compose.
-Runs are triggered manually. Airflow and GitHub Actions are planned extensions.
+**Stack:** Python, PostgreSQL, dbt Core, Metabase, Docker Compose, and optional
+Airflow orchestration. Daily price ingestion can run on a schedule; the fixed
+analytics demo is built manually. GitHub Actions checks are configured; hosted
+execution is pending publication of the workflow.
 The project does not model balances, holdings, or P&L.
 
 ## Dashboard preview
@@ -281,7 +283,7 @@ and side breakdowns.
 
 ## Verification and reconciliation
 
-Recorded runs passed **29 Python tests** and a demo dbt build with **8 models and
+Recorded runs passed **52 Python tests** and a demo dbt build with **8 models and
 88 data tests**. Staging, fact, daily mart, and customer summary reconciled to:
 
 | Metric | Verified demo result |
@@ -472,6 +474,7 @@ public dashboard sharing are not configured.
 | `tests/fixtures/reconciliation/` | Small fixture and independent expected totals |
 | `compose.yaml`, `.env.example` | Services and environment configuration |
 | `docs/` | Design decisions, model contracts, and verification records |
+| `.github/workflows/ci.yml`, `scripts/verify_ci.py`, `compose.ci.yaml` | CI workflow and isolated local reproduction |
 | `AGENTS.md` | Repository working rules |
 
 ## Operations and limitations
@@ -482,9 +485,10 @@ Do not delete volumes or data to resolve startup errors.
 
 - PostgreSQL uses `postgres:16-bookworm`, without a pinned digest. Python direct
   dependencies are pinned; there is no transitive dependency lockfile.
-- No scheduler, CI, alerting, or pipeline run-status table is implemented. Collection
-  and dbt builds are sequential local operations; concurrency and production load
-  have not been tested.
+- Airflow schedules price ingestion locally. CI is configured but not yet verified
+  on GitHub-hosted runners. Alerting and a business run-status table are not
+  implemented. Backfill/manual collection must remain
+  sequential; external concurrent writes and production load have not been tested.
 - Isolated fresh migrations and fixture builds were tested. A complete pipeline
   run from an empty clone, backup/restore, metadata-database restart, and failure
   recovery have not been verified.
@@ -493,3 +497,193 @@ Do not delete volumes or data to resolve startup errors.
   the current implementation.
 
 See [verification](docs/verification.md) for executed checks and remaining gaps.
+
+## Airflow: daily market-price ingestion
+
+Airflow 3.3.2 runs in an opt-in Compose overlay with LocalExecutor, a dedicated
+metadata PostgreSQL service, and persistent auth/log volumes. The image uses
+Python 3.12 and the matching upstream constraints; Airflow packages are not
+installed in the collector or dbt virtual environments.
+
+```bash
+.venv/bin/python scripts/init_airflow_env.py
+.venv/bin/python scripts/setup_airflow_role.py
+docker compose -f compose.yaml -f compose.airflow.yaml build airflow_init
+docker compose -f compose.yaml -f compose.airflow.yaml up -d --wait airflow_api airflow_scheduler airflow_dag_processor
+```
+
+Open **http://localhost:8081** (or `AIRFLOW_PORT`). Use `AIRFLOW_LOCAL_ADMIN_USER`
+and `AIRFLOW_LOCAL_ADMIN_PASSWORD` from `.env`. The local SimpleAuthManager stores passwords in plaintext in its private auth
+volume and reads pre-initialized credentials from a persistent file instead of generating passwords
+in logs. It is a development authentication mechanism, not a production deployment.
+Only the init service uses root to assign ownership to new auth/log volumes;
+runtime services run as the image's `airflow` user. Keep `.env`, auth/metadata/log
+volumes, the Fernet key, and JWT secret; rerunning initialization preserves them.
+The optional dbt docs server must use a different port, for example 8082.
+
+### Schedule and task contract
+
+```text
+market_prices_daily: collect_prices → verify_price_interval
+```
+
+The DAG starts paused. It uses an explicit daily UTC data-interval timetable,
+with `catchup=False` and `max_active_runs=1`. A run covering `[D,D+1)` receives
+both dates directly; `.env`'s historical dates cannot override them. Enabling the
+DAG may immediately schedule the latest completed interval. A fixed start date
+of 2026-10-28 limits the schedule's history; it is not a moving `today()` value.
+
+All three products remain in one collection task and one normalized transaction.
+The downstream check compares coverage, OHLCV, SHA-256, and fetch lineage against
+the exact successful raw responses. XCom contains only dates, counts, products,
+and fetch IDs; response bodies remain in PostgreSQL. Airflow tracks task/run
+state in its metadata DB; this does not add a business run-status table.
+
+The `airflow_collector` role can SELECT/INSERT raw attempts and SELECT/INSERT/UPDATE
+normalized prices. It cannot write synthetic or analytics tables, delete price
+history, create schemas, or run migrations. Tasks use `postgres:5432` inside the
+Compose network and never receive owner or Metabase credentials.
+
+Collection has three HTTP attempts per request and one additional task retry,
+five minutes later. For a one-day, three-product run the upper bound is 18 HTTP
+attempts. Task execution is limited to eight minutes and a DAG run to twenty.
+Transient HTTP/database failures and missing candles may retry; configuration,
+permanent HTTP/TLS, malformed payloads, and failed data checks fail immediately.
+A failed collection blocks verification and makes the DAG fail. `Retry-After`
+above the configured budget stops the task without an extra task retry.
+
+### Manual runs, backfill, and reprocessing
+
+```bash
+.venv/bin/python scripts/airflow_local.py pause --unpause
+# Explicit manual interval; end is exclusive and the range is limited to seven days.
+.venv/bin/python scripts/airflow_local.py run --start 2026-10-28 --end 2026-10-29 --label manual
+.venv/bin/python scripts/airflow_local.py status
+# Fill missing scheduled runs for three completed UTC days.
+.venv/bin/python scripts/airflow_local.py backfill --start 2026-10-29 --end 2026-11-01
+# Reprocess already completed runs, accepting possible provider corrections.
+.venv/bin/python scripts/airflow_local.py backfill --start 2026-10-29 --end 2026-11-01 --reprocess completed
+# Inspect the backfill ID printed by the previous command (example: 2).
+.venv/bin/python scripts/airflow_local.py backfill-status 2
+# Leave the local project paused when not demonstrating the scheduler.
+.venv/bin/python scripts/airflow_local.py pause
+```
+
+The CLI takes an exclusive end and translates it to Airflow's inclusive backfill
+logical-date bounds. In the verified 3.3.2 run, completed reprocessing reused the
+existing run ID and incremented task try numbers; inspect tasks/backfill status
+rather than expecting a new run ID. The backfill-specific active-run limit is also one; the
+`coinbase_serial` one-slot pool serializes tasks. Do not overlap backfill with
+manual reprocessing or run the standalone collector at the same time. The pool
+does not coordinate external Python processes or make concurrent source writes safe.
+
+In the UI, open the run, inspect task attempts/logs, and use Clear to retry an
+existing run after resolving its cause. Clearing collection adds raw attempts and
+upserts existing keys. When reprocessing an older run whose price lineage has
+since changed, clear both collection and verification. For a manual UI trigger,
+provide JSON with ISO `start` and
+`end`; an empty configuration fails rather than selecting an implicit date range.
+
+```bash
+docker compose -f compose.yaml -f compose.airflow.yaml logs --tail=100 airflow_scheduler airflow_dag_processor
+docker compose -f compose.yaml -f compose.airflow.yaml restart airflow_api airflow_scheduler airflow_dag_processor
+docker compose -f compose.yaml -f compose.airflow.yaml up -d --wait airflow_api airflow_scheduler airflow_dag_processor
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/verify_4a.sql
+```
+
+Logs are in the `airflow_logs` volume and accessible through the task UI. Stop
+Airflow services explicitly rather than stopping the business database. Do not
+use `down --volumes` or reset metadata to recover from a failed task.
+
+`portfolio-v1`, synthetic trades, the dbt cutoff, and the customer dashboard remain
+fixed. Scheduled ingestion can add newer market dates without regenerating the
+demo. A real historical close correction may cause the synthetic input guard to
+reject regeneration; do not bypass that guard or overwrite the fixed dataset.
+
+### Isolated Airflow failure/retry checks
+
+The verification image adds test-only DAGs; the normal image does not include them.
+HTTP responses are mocked and prices are written only to a separate tmpfs server.
+
+```bash
+# Build the normal image first, then the verification image.
+docker compose -f compose.yaml -f compose.airflow.yaml -f compose.airflow.test.yaml build airflow_api
+docker compose -f compose.yaml -f compose.airflow.yaml -f compose.airflow.test.yaml up -d --wait airflow_fixture_db
+# On a fresh fixture server only; preserve existing test data on subsequent checks.
+docker compose -f compose.yaml -f compose.airflow.yaml -f compose.airflow.test.yaml exec -T airflow_fixture_db psql -v ON_ERROR_STOP=1 -U airflow_collector -d investment_4a_test < sql/001_schema.sql
+docker compose -f compose.yaml -f compose.airflow.yaml -f compose.airflow.test.yaml exec -T airflow_fixture_db psql -v ON_ERROR_STOP=1 -U airflow_collector -d investment_4a_test < sql/002_multi_asset_synthetic.sql
+docker compose -f compose.yaml -f compose.airflow.yaml -f compose.airflow.test.yaml up -d --wait airflow_api airflow_scheduler airflow_dag_processor
+.venv/bin/python scripts/verify_airflow.py
+# Return to the normal image after test runs finish; retain metadata and test data.
+docker compose -f compose.yaml -f compose.airflow.yaml up -d --wait airflow_api airflow_scheduler airflow_dag_processor
+```
+
+Failure checks execute the production task functions: an incomplete second product
+must leave no partial normalized batch and block verification. A separate run
+exhausts three mocked HTTP 503 attempts, then succeeds on the second task attempt.
+The test retry delay is two seconds; production uses five minutes. Test-run state
+and artifacts are recorded separately from live collection evidence.
+
+## Continuous integration
+
+[The GitHub Actions workflow](.github/workflows/ci.yml) runs on pull requests,
+pushes to `main`, and manual dispatch. It defines three checks:
+
+| Check | Environment | What it verifies |
+| --- | --- | --- |
+| Python tests | Python 3.12 and 3.13 on Ubuntu 24.04 | Collector mocks, UTC boundaries, money/fixtures, orchestration adapters, and CI isolation guards |
+| dbt reconciliation | Python 3.12, PostgreSQL 16 service | Fresh migrations and rerun, four fixture cutoffs, independent totals, and output-schema protection |
+| Airflow DAG contract | Pinned Airflow 3.3.2 image | Production DAG imports and task/schedule limits, with container networking disabled |
+
+No live price requests, synthetic demo regeneration, Metabase provisioning, or
+Airflow scheduler startup takes place in CI. DAG parsing does not replace the
+runtime retry/persistence checks recorded for local Airflow.
+
+The PostgreSQL service uses a public **test-only** password and CI-only user/database;
+no GitHub repository secrets or credentials from `.env` are needed. The runner
+creates a fresh `ci_verify_<UUID>` database, reuses the existing fixture loader and
+reconciliation assertions, and builds the same eight dbt models with 88 tests at
+each cutoff. Baseline totals remain USD 475.94 notional and USD 0.48 fees.
+Attempting to compile with `DBT_SCHEMA=market` must be rejected by the schema guard.
+
+The CI entry point, `scripts/verify_ci.py`, requires explicit `CI_POSTGRES_*`
+settings. It does not load `.env`, start the local demo stack, or connect to its
+databases. It rejects demo database/user/host settings and ports 55432/55433.
+Collector and dbt dependencies stay in separate virtual environments.
+
+Actions are pinned to full commit SHAs. The workflow grants only `contents: read`,
+disables checkout credential persistence, limits job timeouts, and cancels
+superseded runs. Reports are uploaded even when a check fails: JUnit XML, fixture
+reports, per-case dbt run results/manifests, and diagnostic logs. Artifact paths
+are explicitly listed rather than uploading the workspace. Hosted artifacts have
+a seven-day lifetime; this is CI diagnostic storage, not source-data retention.
+
+### Reproduce the database checks locally
+
+This standalone Compose project runs Linux Python 3.12 and a separate PostgreSQL
+server. It does not mount the repository, `.env`, or demo volumes. Its Docker build
+context excludes local credentials and generated dbt artifacts.
+
+```bash
+docker compose -p de_pj_ci -f compose.ci.yaml build ci_runner
+docker compose -p de_pj_ci -f compose.ci.yaml up -d --wait ci_postgres
+docker compose -p de_pj_ci -f compose.ci.yaml run ci_runner
+```
+
+The database binds loopback port 55434 and uses tmpfs. Test databases and the
+`ci_artifacts` named volume remain available for inspection. A rerun creates a new
+CI database; do not delete demo data or reset volumes to repeat the check.
+
+To parse the Airflow DAG independently:
+
+```bash
+docker build -f orchestration/Dockerfile -t investment-airflow-ci .
+docker run --rm --network none -e AIRFLOW__CORE__LOAD_EXAMPLES=false -i --entrypoint python investment-airflow-ci < orchestration/check_dag.py
+```
+
+Local verification passed 52 Python tests on macOS Python 3.13 and in Linux Python
+3.12, all four fixture builds (96 successful nodes each), the schema guard, and
+offline DAG parsing. `actionlint` also passed. **The GitHub-hosted workflow has not
+run yet**: the workflow is not committed/pushed. After publishing it, inspect the
+Actions tab and the job artifacts before treating hosted CI as verified. Branch
+protection and required status checks have not been configured.

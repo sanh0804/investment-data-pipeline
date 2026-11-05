@@ -10,8 +10,9 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_dbt(arguments, overrides=None, log_path=None):
-    load_dotenv(ROOT / '.env')
+def run_dbt(arguments, overrides=None, log_path=None, *, load_local_env=True):
+    if load_local_env:
+        load_dotenv(ROOT / '.env')
     env = os.environ.copy()
     if overrides:
         env.update(overrides)

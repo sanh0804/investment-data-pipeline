@@ -39,10 +39,14 @@ def number(name: str, default: float, minimum: float, maximum: float) -> float:
     return value
 
 
-def load_settings() -> Settings:
+def load_settings(*, start_date: date | None = None, end_date: date | None = None) -> Settings:
     load_dotenv(ROOT / ".env")  # Shell environment takes precedence.
     today = datetime.now(timezone.utc).date()
-    start_text, end_text = os.getenv("START_DATE"), os.getenv("END_DATE")
+    if (start_date is None) != (end_date is None):
+        raise ValueError("Supply both explicit date boundaries")
+    start_text, end_text = ((start_date.isoformat(), end_date.isoformat())
+                            if start_date is not None else
+                            (os.getenv("START_DATE"), os.getenv("END_DATE")))
     if bool(start_text) != bool(end_text):
         raise ValueError("Set both START_DATE and END_DATE, or neither")
     end = date.fromisoformat(end_text) if end_text else today

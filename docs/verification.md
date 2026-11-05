@@ -1,7 +1,7 @@
-# Verification — chặng 1, 2A, 2B và 3
+# Verification — chặng 1, 2A, 2B, 3, 4A và 4B
 
 Trạng thái hiện tại: chặng 1 có commit `4153807`, 2A có `933071b`, 2B có `5993a26`.
-Kết quả chặng 3 ở cuối tài liệu. Các phần trước giữ bằng chứng lịch sử tại thời điểm
+Kết quả chặng 4B ở cuối tài liệu. Các phần trước giữ bằng chứng lịch sử tại thời điểm
 kiểm chứng; các dòng “chưa commit/chưa Metabase” không mô tả trạng thái sau chặng 3.
 
 Ngày kiểm tra: 2026-11-01 (Asia/Ho_Chi_Minh). Kết quả dưới đây là các lệnh đã chạy
@@ -537,3 +537,252 @@ scripts Metabase và `git diff --check` đều pass. Không chạy lại các in
 checks ở phần trên trong lần commit này. Hai ảnh PNG bổ sung trong screenshots
 đã được xem: là dashboard desktop do user cung cấp, không phải kiểm thử Chrome
 mới do agent thực hiện. Commit chặng 3 local; không push remote.
+
+## Chặng 4A — Airflow local, 2026-11-05
+
+### Môi trường và phạm vi
+
+Đã đọc collector/config/schema/Compose trước khi triển khai; cập nhật plan ở
+`docs/plans/stage-4a.md` để phân biệt backfill ngày thiếu và reprocess ngày đã có.
+Working tree ban đầu chỉ có plan chưa tracked; HEAD là `78976b3`. Không commit,
+push, xóa volume hoặc dữ liệu để triển khai 4A.
+
+Host `uname -m=arm64`, Python 3.13.5, RAM 16 GiB; Docker daemon aarch64 được cấp
+8.218.034.176 bytes, Compose v2.39.2. Docker Desktop ban đầu tắt, đã mở lại.
+Image `apache/airflow:3.3.2-python3.12` có manifest linux/arm64 và đã chạy native.
+Base image digest:
+`sha256:9df9c8be4096b9cc626bd7cb1f2b8c712eef66c59c615f8c7e6200871ca10bd1`.
+Upstream constraints Python 3.12 được lưu trong orchestration; image riêng dùng
+requests 2.34.2, psycopg 3.3.5, python-dotenv 1.2.3 theo constraints. Collector host
+requirements và môi trường dbt không đổi.
+
+LocalExecutor, API server, scheduler, DAG processor, metadata PostgreSQL riêng;
+không Redis/Celery/Docker socket. UI bind loopback 8081; business PostgreSQL 55432,
+Metabase 3000 và các volume cũ giữ nguyên. Airflow metadata/auth/logs dùng ba named
+volumes riêng. Init mới gặp PermissionError ở auth volume; đã sửa init cấp đúng
+ownership thư mục rồi chạy migration bằng airflow user. Không reset volume.
+Trong một lần recreate, Docker API proxy chờ nhiều phút trước khi start containers;
+sau đó services lên healthy, không xác định chắc nguyên nhân và không coi là lỗi DAG.
+
+### Live ingestion, backfill và reprocessing
+
+DAG `market_prices_daily` có `collect_prices → verify_price_interval`;
+CronDataIntervalTimetable midnight UTC explicit, catchup=False, một active run và
+pool coinbase_serial một slot. Scoped role `airflow_collector` dùng raw SELECT/INSERT,
+market SELECT/INSERT/UPDATE; không dùng owner để chạy tasks. Secrets ở .env mode0600,
+không mount .env/host virtualenv vào containers. Init env rerun báo 0 values mới.
+
+Các runs live đã thực sự thành công, cả collection và verification:
+
+| Run | Phạm vi UTC [start,end) | Kết quả |
+| --- | --- | --- |
+| `scheduled__2026-11-05T00:00:00+00:00` | 2026-11-04 → 2026-11-05 | 3 products, 3 rows |
+| `manual__live__20261105T095634069118` | 2026-10-28 → 2026-10-29 | 3 products, 3 rows |
+| `manual__reprocess__20261105T095722791910` | Cùng ngày 2026-10-28 | Vẫn 3 keys, full OHLCV business snapshot bằng nhau |
+| `backfill__2026-10-30T00:00:00+00:00` | 2026-10-29 → 2026-10-30 | Thành công |
+| `backfill__2026-10-31T00:00:00+00:00` | 2026-10-30 → 2026-10-31 | Thành công |
+| `backfill__2026-11-01T00:00:00+00:00` | 2026-10-31 → 2026-11-01 | Thành công |
+
+Backfill ID 1 có max_active_runs=1, reprocess_behavior=none. CLI nhận exclusive end
+2026-11-01 và chuyển thành logical-date bounds 2026-10-29..2026-10-31 theo API.
+Run ID của Airflow này biểu diễn interval end; đã đối chiếu actual data_interval,
+không suy ngày cần lấy chỉ từ chuỗi run_id.
+
+Sau sáu runs thành công: raw 20→38, normalized 540→555, mỗi product 185 ngày.
+Các ngày mới là Oct28..31 và Nov4, không tuyên bố coverage liên tục tới Nov4.
+`sql/verify_4a.sql` qua psql ON_ERROR_STOP: Oct28..31 đủ 4 ngày/product,
+missing_keys=0, invalid_lineage_or_utc=0. Không dùng fixture để load database live.
+
+Exact-response replay bằng `pipeline.verify_idempotency` cho BTC ngày Oct28:
+fetch_id `62313586-2f61-4390-8aa7-b79c24ffbf08`, SHA-256
+`4b81a836a602f39338fe64f28e0d2d1460626fd198aa0cabb540b5c9e78ec5fb`.
+Hai transaction trả rows_after_first=1, rows_after_second=1,
+business_values_equal=true; không thêm raw hoặc gọi API. Không nhầm live re-fetch
+với exact-body replay: provider có thể sửa business values khi fetch lại.
+
+### Fault injection và task retry
+
+`scripts/verify_airflow.py` đã chạy trên verification image riêng. Test DAGs chỉ
+được copy vào image kiểm thử; production DAG functions được gọi lại trong task
+process thật. HTTP là mock, PostgreSQL là service `airflow_fixture_db`, database
+`investment_4a_test`, tmpfs, không host port và không mount business volume.
+Migrations 001/002 đã chạy trên server mới này; raw/normalized ban đầu đều rỗng.
+
+| Case | Bằng chứng thực tế |
+| --- | --- |
+| Missing second product | `verify_4a_failure`, run `manual__isolated__20261105T121936241035`: collection failed try1, verify upstream_failed; raw 0→2, normalized 0→0 |
+| Retryable HTTP | `verify_4a_retry`, run `manual__isolated__20261105T121942488333`: ba mocked HTTP503 ở attempt1, task attempt2 thành công và verify success; raw 2→8, normalized 0→3 |
+
+Failure case cố ý đặt retries=0 để kiểm tra trạng thái fail/blocked. Retry case đặt
+delay 2 giây để kiểm thử; production dùng 5 phút. Các payload giá test không phải
+response Coinbase live, dù dùng cùng schema/collector. Không có test flag hoặc
+endpoint fixture trong production DAG.
+
+Đã thử manual run thiếu conf trên DAG production:
+`manual__invalid_boundaries__20261105T122033`: collect failed try1 dù cấu hình retries=1,
+verify upstream_failed, raw trước/sau đều 38. Không fallback sang dates .env,
+không gọi API hoặc retry lỗi cấu hình.
+
+`python -m pytest -q`: **45 passed** (29 cũ, 16 mới cho intervals/lineage và malformed
+JSON). Kiểm tra explicit dates thắng .env sai, naive/non-midnight/future/empty/too-long
+ranges, checksum/values/lineage thiếu hoặc sai, và bảo toàn exception validation.
+Tests cũ đã bổ sung assert retryable classification cho HTTP transient/permanent/TLS.
+Collector và dbt `pip check` đều không broken requirements.
+
+### Bảo toàn demo và phạm vi UI
+
+So full-row snapshots: 20 raw cũ và 540 normalized prices trước Oct28 không đổi;
+synthetic.datasets/customers/trades checksums bằng trước triển khai.
+Analytics vẫn 50000 trades, 615063969.51 USD notional, 615063.60 USD fees và
+900 distinct active customers; segments active600/inactive300/never100.
+`verify_metabase.py` đã chạy lại thành công trên cả bốn filter cases, read-only ACL,
+customer snapshot và ranking. Không chạy dbt build hay sinh lại synthetic.
+
+UI automation: in-app browser không có sẵn, browser inventory rỗng. Không tạo ảnh
+Airflow giả và không tuyên bố đã thao tác browser UI. Backend health và đăng nhập
+API bằng local credentials đã thành công. Trên Mac: mở localhost:8081, login từ
+.env, chọn market_prices_daily, mở run và xem task attempts/logs. Các thao tác UI
+này để user kiểm tra; DAG được pause sau buổi kiểm chứng.
+
+Logs, run reports và snapshots nằm trong ignored data/airflow-* và data/stage4a-*.
+Không đưa chúng hoặc credentials vào Git. Các phần lịch sử trước giữ đúng bằng
+chứng tại thời điểm chạy, kể cả ghi chú về phạm vi chưa có Airflow lúc đó.
+
+### Native completed reprocessing và persistence
+
+Đã chạy thêm backfill ID 2 với reprocess_behavior=completed cho Oct29, kết thúc
+thành công. Airflow 3.3.2 tái sử dụng run
+`backfill__2026-10-30T00:00:00+00:00`, hai task tăng try_number 1→2; không tạo
+run ID mới. Kiểm tra ban đầu chờ run ID mới không phù hợp hành vi này; đã chuyển
+sang đối chiếu backfill completed_at và task attempts. Mỗi product có hai raw
+responses Oct29 cùng SHA-256; normalized giữ nguyên keys/values. Raw tăng 38→41,
+normalized vẫn 555. Đây là re-fetch live, tách khỏi exact-body replay ở trên.
+
+Đã kiểm tra sau recreate từ verification image về normal image: toàn bộ 7 run
+records/task states lúc đó bằng snapshot trước recreate. Logs task collection
+của manual live run lấy được qua API, gồm 16 entries. Sau native reprocessing,
+lưu snapshot mới để không nhầm các thay đổi task attempts có chủ đích với mất
+persistence. Deployment cuối dùng normal image, test DAG files không có trong
+image này; metadata lịch sử test vẫn được giữ.
+
+Lần restart cuối (sau reprocessing) đã so snapshot đủ 7 production run IDs,
+config/intervals/states và từng task attempt/start/end: bằng nhau trước/sau.
+Login API sau restart thành công, DAG paused=true. Task log cũ giữ đủ 16 entries
+với content bằng nhau; named volumes metadata/auth/logs vẫn còn. Airflow image
+`pip check` không broken requirements, runtime Python 3.12.14 aarch64;
+normal DAG import-errors list rỗng. Collector role không có elevated flags,
+role memberships hoặc table ownership trong business DB.
+
+Rà soát cuối: 45 Python tests pass; base/normal/test Compose config --quiet hợp lệ,
+git diff --check không lỗi. Scan 93 candidate tracked/untracked files với local
+passwords/Fernet/JWT keys không phát hiện secrets/private keys hoặc artifacts;
+Python syntax parse pass. Staged area vẫn rỗng. Đã kiểm tra status/backfill-status
+CLI; backfill ID 2 completed, production history có 6 successful runs và 1 failed
+run do cố ý thiếu manual conf. Native reprocessing tái sử dụng một trong 6 run IDs.
+Tổng cuối raw=41, prices=555, customers=1000, trades=50000. Cả 21 HTTP attempts mới
+ở DB live đều HTTP200 tại attempt1; HTTP503/failure/retry chỉ được gây bằng mocks.
+Business sources demo và totals analytics được so lại sau native reprocessing,
+vẫn không đổi. Các services Airflow/business/Metabase đều healthy; test tmpfs
+server giữ nguyên để review, không xóa data. Code/Compose/docs 4A chưa commit/push.
+
+### Chưa chạy / giới hạn sau 4A
+
+- Chưa thao tác Airflow browser UI hoặc có screenshot mới: browser connector không
+  có sẵn. API login, task logs, run/task states đã kiểm tra; user kiểm tra UI trên Mac.
+- Chưa xác minh live API429/outage, database outage, hard kill giữa commit, concurrent
+  collectors, overlapping manual/backfill hoặc external writes. Không dùng pool
+  để tuyên bố khóa được các Python processes bên ngoài Airflow.
+- Chưa kiểm tra metadata PostgreSQL restart, backup/restore, mất auth/Fernet/JWT key,
+  upgrade Airflow, host/architecture khác, production load hoặc deployment public.
+- SimpleAuthManager lưu password dạng plaintext trong auth volume riêng và chỉ
+  phù hợp development loopback. Chưa SSO/TLS/SMTP/alerting; không production-ready.
+- Chưa chạy pipeline đầy đủ từ clone trống; mới metadata Airflow và fixture DB đã
+  khởi tạo trong lần này trên business database có sẵn.
+- Chưa thêm CI, scheduled dbt/synthetic builds, run-status table nghiệp vụ, RFM,
+  retention, AI, SCD2, balances, holdings hoặc P&L. Dừng sau 4A để review.
+
+## Chặng 4B — GitHub Actions, 2026-11-05
+
+### Triển khai và isolation
+
+Đã đối chiếu ghi chép 4A ở README/decisions/verification và learning-notes local
+trước khi mở scope CI. Các thay đổi 4A vẫn ở working tree; không tự commit hoặc
+push để kích hoạt workflow. Plan 4B ở docs/plans/stage-4b.md.
+
+`.github/workflows/ci.yml` có pull_request, push main và workflow_dispatch:
+unit matrix Python3.12/3.13 trên ubuntu-24.04, PostgreSQL16 + fixture/dbt, và
+Airflow production DAG parse trong pinned image với network=none.
+Không dùng pull_request_target hoặc repository secrets; contents:read,
+checkout persist-credentials=false, job timeout, concurrency cancellation và
+artifact whitelist. Actions checkout v7.0.1/setup-python v7.1.0/upload-artifact
+v7.0.2 pin full SHAs đã đọc từ official repositories; action metadata dùng Node24.
+
+`scripts/verify_ci.py` không load .env, không đọc snapshot hoặc kết nối database
+demo. Chỉ nhận CI_POSTGRES_* tường minh, từ chối user/database/host không thuộc
+CI và ports55432/55433. Shared apply_migrations(conn) được tách từ init_db, giữ
+nguyên numbered migrations/transaction behavior; wrapper dbt có load_local_env=False.
+Fixture loader, oracle assertions và SQL models dùng lại từ verify_dbt, không có
+bản models CI riêng. Password ci_fixture_only_password chỉ là credentials public
+của PostgreSQL test tạm, không phải secret trên Mac.
+
+### Kết quả thực sự đã chạy local
+
+| Check | Kết quả |
+| --- | --- |
+| Python host3.13.5/macOS arm64 | 52 passed; JUnit ở ignored data/stage4b-unit-host.xml |
+| Python Linux3.12.16/aarch64 | 52 passed; chạy trong CI reproduction image |
+| Fresh migrations001/002 và rerun | Pass trên ci_verify_ae0faff9e11a, schema_migrations=2 |
+| Baseline cutoff2026-05-03 | 8 models +88 tests, 96 nodes pass; 4 customers/6 trades |
+| Early cutoff2026-05-01 | 96 nodes pass; summary/cutoff assertions pass |
+| Threshold cutoff2026-06-02 | 96 nodes pass; recency30/31 và segments pass |
+| Inactive cutoff2026-07-02 | 96 nodes pass; recency60/61/never semantics pass |
+| Source-schema guard | Compile với DBT_SCHEMA=market bị từ chối đúng thông báo guard |
+| Airflow DAG import/contract | Pass với network=none, không runtime credentials |
+| actionlint1.7.12 | Workflow không lỗi |
+
+52 tests gồm 45 tests sau4A và 7 checks mới cho CI connection guards, credentials
+bắt buộc và wrapper không load .env/không đưa password vào argv. Test wrapper dùng
+temporary fake executable để unit job không cần cài dbt.
+
+Baseline output dbt so với expected_totals.json khớp 475.94 USD notional và 0.48 USD
+fees; mọi group customer/product/side/date, row-level amounts và daily distinct
+[1,1,2] đều pass. Mọi cutoff assert các bảng raw/market/synthetic chuẩn trong CI DB
+vẫn rỗng; fixture chỉ ở fixture_input. Các test có dataset/provider distractors
+và future rows dùng cùng assertions đã có, không mô tả fixture là dữ liệu API live.
+
+Local reproduction dùng compose.ci.yaml/project de_pj_ci. ci_postgres ở loopback55434,
+database bootstrap investment_ci, server tmpfs. docker inspect xác nhận
+HostConfig.Tmpfs=/var/lib/postgresql/data, Mounts=[]; runner chỉ mount named volume
+de_pj_ci_ci_artifacts, không bind repo/.env hoặc business volume. Container
+`de-pj-ci-verification` exited0, được giữ lại cùng test DB để review. Artifacts đã
+copy ra ignored data/ci-linux-artifacts/: report.json, per-case targets/logs và JUnit.
+Không xóa test DB hoặc volume để kiểm chứng.
+
+DAG parser ban đầu dùng include_examples argument của API cũ và bị TypeError;
+đã chuyển sang airflow.dag_processing.dagbag.DagBag theo actual3.3.2 signature,
+tắt examples bằng env và chạy lại thành công. DAG có hai tasks đúng dependencies,
+CronDataIntervalTimetable, catchup=False, max_active_runs=1, pool và retries đúng.
+Có deprecation warning cho import AirflowFailException từ airflow.exceptions
+trong DAG4A; pinned3.3.2 vẫn parse pass. Chưa nâng Airflow hoặc sửa runtime chỉ để
+che warning; cần xem lại alias khi upgrade.
+
+Full source snapshots raw/market/synthetic demo trước/sau CI bằng nhau.
+Airflow/Metabase services vẫn healthy; CI không thu giá mới, không sinh lại trades
+hoặc build analytics demo. Scan101 candidate files không có local secrets,
+private keys hoặc generated artifacts; Python syntax, README local links,
+Compose CI config --quiet và git diff --check pass. Staged area rỗng.
+
+### Chưa chạy / giới hạn sau 4B
+
+- **Chưa chạy workflow trên GitHub-hosted runners**: workflow chưa commit/push,
+  không có run URL hoặc green badge để công bố. Local Linux arm64/Debian image
+  không được coi là bằng chứng Ubuntu24.04/x64 hosted jobs đã pass.
+- Chưa chạy LinuxPython3.13 trong lần này; Python3.13 mới chạy trên macOS.
+- Chưa cấu hình branch protection/required status checks; chưa xác minh upload/
+  download artifacts, cache hit, fork PR permissions hoặc cancellation trên GitHub.
+- DAG parse không kiểm chứng scheduler/retry/HTTP live; các bằng chứng runtime
+  thuộc4A. CI không chạy Airflow scheduler hoặc Metabase.
+- Direct dependencies/actions được pin, nhưng chưa có transitive Python lockfile
+  hoặc digest pin cho PostgreSQL/Python reproduction images.
+- Chưa deploy, auto-refresh dbt/synthetic, AI/RFM/retention/SCD2 hay tính năng mới.
+  Dừng sau4B để review; các thay đổi4A/4B chưa commit hoặc push.

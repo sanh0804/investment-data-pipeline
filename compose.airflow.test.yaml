@@ -1,0 +1,27 @@
+# Verification only: fixture DAGs are absent from the normal Airflow deployment.
+x-test-image: &test-image
+  image: de-pj-airflow-verify:3.3.2-python3.12
+  build:
+    context: .
+    dockerfile: orchestration/Dockerfile.verify
+services:
+  airflow_fixture_db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: investment_4a_test
+      POSTGRES_USER: airflow_collector
+      POSTGRES_PASSWORD: ${AIRFLOW_COLLECTOR_PASSWORD:?Initialize env}
+      TZ: UTC
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U airflow_collector -d investment_4a_test']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  airflow_api:
+    <<: *test-image
+  airflow_scheduler:
+    <<: *test-image
+  airflow_dag_processor:
+    <<: *test-image

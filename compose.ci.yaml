@@ -1,0 +1,34 @@
+# Independent local reproduction of CI. No demo services, mounts or credentials.
+services:
+  ci_postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: investment_ci
+      POSTGRES_USER: ci_runner
+      POSTGRES_PASSWORD: ci_fixture_only_password
+    ports:
+      - '127.0.0.1:55434:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U ci_runner -d investment_ci']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  ci_runner:
+    build:
+      context: .
+      dockerfile: ci/Dockerfile
+    environment:
+      CI_POSTGRES_HOST: ci_postgres
+      CI_POSTGRES_PORT: '5432'
+      CI_POSTGRES_DB: investment_ci
+      CI_POSTGRES_USER: ci_runner
+      CI_POSTGRES_PASSWORD: ci_fixture_only_password
+    volumes:
+      - ci_artifacts:/workspace/data
+    depends_on:
+      ci_postgres:
+        condition: service_healthy
+volumes:
+  ci_artifacts:
