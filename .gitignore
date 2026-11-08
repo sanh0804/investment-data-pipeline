@@ -13,3 +13,8 @@ __pycache__/
 data/
 docs/learning-notes.md
 /investment_pipeline_summary_and_interview_notes.md
+# Local agent tooling, not part of the pipeline
+.agents/
+.claude/
+CLAUDE.md
+skills-lock.json

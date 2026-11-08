@@ -1,4 +1,4 @@
-# Verification — chặng 1, 2A, 2B, 3, 4A và 4B
+# Verification — chặng 1, 2A, 2B, 3, 4A, 4B và 5A
 
 Trạng thái hiện tại: chặng 1 có commit `4153807`, 2A có `933071b`, 2B có `5993a26`.
 Kết quả chặng 4B ở cuối tài liệu. Các phần trước giữ bằng chứng lịch sử tại thời điểm
@@ -818,3 +818,54 @@ trước là lịch sử trước lần xuất bản này. Hosted CI kiểm tra 
 imports, không thay thế bằng chứng live collection hoặc Airflow browser UI.
 Chưa thử fork PR, manual dispatch, cancellation, branch protection/required checks
 hoặc deployment. Không mở rộng scope ngoài4A/4B.
+
+
+## Chặng 5A — Delta Lake raw layer, 2026-11-09
+
+### Môi trường và lựa chọn đã kiểm chứng trước khi code
+
+- Host arm64 macOS, 16 GB RAM, Docker 8 GB/10 CPU aarch64, không có Java.
+  Python `.venv` 3.13.5; CI image Python 3.12.
+- MinIO: GitHub `minio/minio` archived=true, release cuối RELEASE.2025-10-15;
+  Docker Hub `minio/minio` trả "object not found". LocalStack archived.
+  RustFS 1.0.3 (2026-10-17) có image arm64/amd64; chọn bản này.
+- Spike scratch (local filesystem): Decimal round-trip đúng; MERGE cùng batch giữ
+  số dòng nhưng tăng version; time travel đọc giá trước correction; thiếu/thừa cột
+  và chuỗi sai kiểu bị từ chối; float 1.239 vào DECIMAL(20,2) được nhận thành 1.24.
+- Spike RustFS (container tạm, không volume): create bucket, put/get, hash khớp;
+  `If-None-Match: *` lần hai trả PreconditionFailed; Delta write/MERGE/time travel
+  trên S3 thành công. `to_pyarrow_table()` treo khi thoát 12/12, `to_pyarrow_dataset()`
+  7/8, đọc metadata 0/12, `QueryBuilder` 0/8 và time travel qua QueryBuilder 0/20
+  (timeout 8 giây mỗi lần). Container spike đã dừng (`--rm`).
+
+### Kết quả thực sự đã chạy
+
+- `.venv/bin/python -m pytest -q`: 62 passed (52 cũ + 10 test mới: object key, attempt
+  không body, hash lệch, schema guard int64/float/naive timestamp, put-once
+  trùng/xung đột/lỗi khác, rerun manifest không tạo version, time travel).
+- `scripts/init_lake_env.py` điền 4 giá trị LAKE_*; `docker compose config --quiet`
+  pass; `lake_storage` healthy, chạy uid 10001 (rustfs), volume `de_pj_lake_data`.
+- Export lần 1: `{"raw_rows": 41, "objects_uploaded": 25, "objects_present": 0,
+  "manifest_rows_inserted": 41, "manifest_version": 0}`, 2.26 s.
+- Export lần 2 (cùng input): `objects_uploaded: 0, objects_present: 25,
+  manifest_rows_inserted: 0, manifest_version: 0`, 1.28 s. Process thoát bình thường.
+- `raw.price_fetches` trước/sau: 41 dòng, md5(fetch_id||sha) giống hệt
+  `5c0ad387eb20880637897e021901db36`.
+- `scripts/verify_lake.py`: raw_rows 41 = manifest_rows 41, không trùng fetch_id,
+  mọi trường khớp PostgreSQL; distinct_hashes 25 = objects 25; mỗi object hash đúng key;
+  attempts_without_body 0; raw_body_bytes 66,768; passed=true.
+- Fault injection: ghi đè không điều kiện một object bằng `tampered` → verify exit 1
+  "Object bytes do not match key"; khôi phục bytes gốc từ PostgreSQL → verify exit 0.
+- `docker compose restart lake_storage` rồi verify lại: passed, dữ liệu còn trong volume.
+- CI local reproduction (`compose.ci.yaml`, image build lại với requirements-lake):
+  62 passed; bốn fixture cutoffs PASS 8 models + 88 tests; passed=true,
+  schema_guard_passed=true.
+
+### Chưa chạy / giới hạn sau 5A
+
+- Live data không có attempt lỗi; nhánh body NULL chỉ được kiểm bằng unit test.
+- Chưa chạy GitHub-hosted CI với thay đổi này; CI chưa có object storage service.
+- Chưa thử AWS S3, concurrent writers, quyền bucket theo user, versioning/lifecycle
+  của bucket, hoặc backup/restore volume `lake_data`.
+- Nguyên nhân treo của đường pyarrow chưa xác định (delta-rs hay RustFS).
+- Silver prices, published report snapshots và diff (5B–5C) chưa triển khai.

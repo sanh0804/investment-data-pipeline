@@ -6,8 +6,9 @@ analytics và phạm vi vận hành local. Bằng chứng chạy thực tế n�
 ## Phạm vi
 
 Python collector thu thập daily BTC/ETH/SOL vào PostgreSQL; dbt xây analytics và
-Metabase hiển thị dashboard. Docker Compose phục vụ vận hành local. Orchestration
-và CI là hướng mở rộng. Quy tắc làm việc ở `AGENTS.md`, hướng dẫn vận hành ở README.
+Metabase hiển thị dashboard. Docker Compose phục vụ vận hành local; Airflow lập lịch
+thu giá, GitHub Actions kiểm tra code/fixtures, và raw responses được sao sang object
+storage kèm Delta manifest. Quy tắc làm việc ở `AGENTS.md`, hướng dẫn vận hành ở README.
 
 ## Provider và kiểm chứng API trước khi normalize
 
@@ -308,3 +309,53 @@ branch protection hoặc publish workflow chỉ để có badge xanh.
 Tham khảo: [PostgreSQL service containers](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-postgresql-service-containers),
 [Python workflows](https://docs.github.com/en/actions/tutorials/build-and-test-code/python),
 [dbt secret env vars](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var).
+
+## Delta Lake raw layer (5A)
+
+Mục tiêu nghiệp vụ: giữ raw inputs bất biến ngoài database đang phục vụ dashboard,
+để sau này tái tạo/giải thích báo cáo (5B–5C trong docs/plans/stage-5.md). Đây là
+data lake layer cạnh warehouse, không phải lakehouse: metric vẫn chỉ định nghĩa
+trong dbt; lớp này không viết lại SQL metric nên không có hai định nghĩa lệch nhau.
+Với vài trăm dòng, Spark/JVM không cần thiết; dùng Python `deltalake` (delta-rs).
+
+### Object storage: RustFS thay MinIO
+
+Plan ban đầu chọn MinIO. Kiểm tra ngày 2026-11-09: repository `minio/minio` đã
+archived (release cuối RELEASE.2025-10-15) và `minio/minio` không còn trên Docker Hub.
+Thêm phần mềm không còn bảo trì vào stack mới là rủi ro bảo mật. LocalStack cũng đã
+archived. Chọn RustFS 1.0.3 (Apache-2.0, phát hành 2026-10-17, image arm64/amd64):
+API S3, single container, `/health` và có `curl` cho healthcheck. Trade-off: dự án
+trẻ hơn MinIO. SeaweedFS/versitygw là phương án dự phòng. Code chỉ dùng API S3 qua
+boto3/delta-rs nên đổi storage chỉ cần đổi endpoint/credentials.
+
+### Key, grain và idempotency
+
+- Object key `bronze/coinbase/<sha256 của body>`: cùng bytes lưu một lần (41 attempts
+  → 25 objects). Upload với `If-None-Match: *`; nếu key tồn tại thì đọc lại và so
+  hash, khác nội dung thì dừng. Không bao giờ ghi đè object.
+- Trước khi copy, tính lại SHA-256 của `response_body` và so với `response_sha256`
+  trong PostgreSQL; lệch thì dừng toàn bộ export trước khi ghi bất kỳ thứ gì.
+- Manifest grain: một dòng mỗi HTTP attempt, key `fetch_id`, kể cả attempt không có
+  body (transport error → object_key NULL). JSONB lưu dạng JSON canonical (sort keys).
+- Ghi object trước, manifest sau: manifest không bao giờ trỏ tới object chưa có. Nếu
+  lỗi giữa chừng, object thừa vô hại vì content-addressed và lần sau được nhận ra.
+- MERGE insert-only theo `fetch_id`; dòng cũ không bị update vì raw là append-only.
+  Không commit khi không có dòng mới: spike cho thấy MERGE rỗng vẫn tạo version mới,
+  nên idempotency được kiểm bằng dữ liệu và bằng version không đổi.
+
+### Schema guard và đường đọc
+
+- Spike: delta-rs từ chối thiếu/thừa cột và chuỗi không cast được, nhưng nhận float
+  vào cột DECIMAL(20,2) và làm tròn im lặng (1.239 → 1.24). Vì vậy so Arrow schema
+  chính xác trước mỗi lần ghi, và so schema Delta hiện có với schema mong đợi.
+- Với deltalake 1.6.6 trên RustFS, `to_pyarrow_table()`/`to_pyarrow_dataset()` trả
+  đúng dữ liệu nhưng process treo khi thoát (12/12 và 7/8 lần thử); `QueryBuilder`
+  (DataFusion SQL) 0/20 lần treo, kể cả time travel. Mọi lần đọc dùng QueryBuilder.
+  Chưa xác định nguyên nhân là delta-rs hay RustFS; chưa thử trên AWS S3.
+
+### Dependencies và bảo mật
+
+`requirements-lake.txt` (deltalake 1.6.6, pyarrow 26.0.0, boto3 1.43.118) được
+`requirements-dev.txt` include; image Airflow không cài các gói này. Chọn bản phát
+hành ít nhất hai tuần. Credentials `LAKE_*` do `init_lake_env.py` sinh vào `.env`;
+storage chỉ bind 127.0.0.1. `AWS_ALLOW_HTTP` chỉ bật khi endpoint là http local.
