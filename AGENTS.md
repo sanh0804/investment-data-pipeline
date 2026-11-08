@@ -3,9 +3,10 @@
 Personal portfolio project for Data Engineering / Data Analytics roles, on macOS.
 
 ## Scope and working rules
-- Current authorized scope: stage 4B — GitHub Actions for offline Python tests, isolated fresh PostgreSQL migrations/dbt fixture reconciliation, and Airflow DAG parsing. Stop after 4B; no deployment or live collection in CI.
-- Planned stack: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose, GitHub Actions. Later scope includes BTC/ETH/SOL, 1,000 simulated customers and 50,000 matched trades, SQL transformations, quality checks, reconciliation, customer summary and one dashboard. Airflow 4A is implemented; CI 4B is authorized now.
-- Do not implement AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L in stage 4B. Keep portfolio-v1, dbt cutoff and dashboard fixed; do not schedule synthetic regeneration or dbt builds.
+- Current authorized scope: stage 5A — copy raw Coinbase responses (including unsuccessful attempts) from PostgreSQL to content-addressed objects in local S3-compatible storage (RustFS; MinIO is archived), with a Delta Lake manifest written by the Python `deltalake` package. 5A is implemented; stop for review before 5B. Plan: docs/plans/stage-5.md.
+- Stack: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose, GitHub Actions; stage 5 adds RustFS object storage and Delta Lake (delta-rs, no Spark/JVM). Stages 1–4B are implemented and verified.
+- Do not implement Spark, AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L. Keep portfolio-v1, dbt cutoff and dashboard fixed; do not schedule synthetic regeneration or dbt builds.
+- The Delta layer stores raw objects, normalized prices and published dbt snapshots only; never reimplement dbt metrics. Compare the exact Arrow schema before every Delta write (lossy float→DECIMAL casts are accepted silently). Read Delta tables on S3 only through `QueryBuilder`; `to_pyarrow_*` reads hung at process exit. Never overwrite bronze objects. Call it a Delta Lake / data lake layer beside the warehouse, not a lakehouse.
 - Inspect machine architecture and installed tools; never assume Intel or Apple Silicon.
 - Keep the repository small and understandable. Prefer explicit SQL and ordinary Python functions over extra frameworks.
 - Write docs and comments around concrete design choices, assumptions, trade-offs and observed results. Avoid progress-report filler and repeated scope disclaimers. Comments should explain non-obvious reasons. Preserve verification evidence and disclose assistance accurately; do not invent research, benchmarks or authorship claims.
@@ -37,6 +38,7 @@ Personal portfolio project for Data Engineering / Data Analytics roles, on macOS
 - Dashboard verification: `.venv/bin/python scripts/verify_metabase.py`
 - Airflow: `.venv/bin/python scripts/init_airflow_env.py`; `.venv/bin/python scripts/setup_airflow_role.py`; `docker compose -f compose.yaml -f compose.airflow.yaml up -d --wait airflow_api airflow_scheduler airflow_dag_processor` (build the image first).
 - Airflow manual: `.venv/bin/python scripts/airflow_local.py run --start 2026-10-28 --end 2026-10-29`; backfill uses the same exclusive-end contract.
+- Delta Lake raw layer: `.venv/bin/python scripts/init_lake_env.py`; `docker compose up -d --wait lake_storage`; `.venv/bin/python -m pipeline.lake`; verify with `.venv/bin/python scripts/verify_lake.py`.
 - CI local reproduction: `docker compose -p de_pj_ci -f compose.ci.yaml build ci_runner`; `docker compose -p de_pj_ci -f compose.ci.yaml run ci_runner`. No .env or demo credentials are required.
 - CI entry point: `scripts/verify_ci.py` requires explicit CI_POSTGRES_* settings and reuses fixture models/assertions. Never use a production database for CI.
 - Airflow fault/retry verification: `scripts/verify_airflow.py` requires the separate verification image, test overlay and migrated tmpfs fixture DB. Keep normal DAG paused after review and never overlap CLI/backfill/manual ingestion.

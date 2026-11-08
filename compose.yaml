@@ -64,6 +64,27 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+  # S3-compatible object storage for the Delta Lake layer. RustFS instead of MinIO:
+  # minio/minio was archived and its Docker Hub image is no longer published.
+  lake_storage:
+    image: rustfs/rustfs:1.0.3
+    environment:
+      RUSTFS_ACCESS_KEY: ${LAKE_ACCESS_KEY:?Set LAKE_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${LAKE_SECRET_KEY:?Set LAKE_SECRET_KEY in .env}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${LAKE_PORT:-59000}:9000"
+    volumes:
+      - lake_data:/data
+    healthcheck:
+      test: [CMD-SHELL, 'curl --fail --silent http://localhost:9000/health > /dev/null']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   metabase_metadata:
+  lake_data:

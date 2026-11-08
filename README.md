@@ -1,18 +1,60 @@
 # Investment Data Pipeline & Analytics
 
-A local batch pipeline that takes data from an API to an analytics dashboard, with
-reconciliation across raw storage, normalized tables, facts, and marts.
+A batch data pipeline for a simulated crypto brokerage: real market prices from an
+API, through raw storage and dbt models, to a dashboard of trading volume and fee
+revenue. The focus is on numbers that can be proven correct: dbt models and dashboard
+cards are reconciled against independent SQL and fixture totals, and reruns are
+checked to change nothing.
 
-Daily BTC, ETH, and SOL candles come from **Coinbase Exchange**. The customer and
-execution data—**1,000 customers and 50,000 matched trades—are entirely synthetic**.
-They provide a controlled dataset for testing aggregations, monetary calculations,
-and customer activity summaries.
+> **Data honesty:** BTC/ETH/SOL daily prices are real (Coinbase Exchange). The 1,000
+> customers and 50,000 trades are **synthetic**, generated with a fixed seed so
+> aggregations can be checked against known answers.
 
-**Stack:** Python, PostgreSQL, dbt Core, Metabase, Docker Compose, and optional
-Airflow orchestration. Daily price ingestion can run on a schedule; the fixed
-analytics demo is built manually. GitHub Actions checks are verified on hosted
-Ubuntu runners; see the CI verification link below.
-The project does not model balances, holdings, or P&L.
+```mermaid
+flowchart LR
+    API[Coinbase API] --> RAW[(raw responses<br/>bytes + SHA-256)]
+    RAW --> PRICES[(daily prices<br/>UTC, Decimal)]
+    RAW -. copy .-> LAKE[(S3 object storage<br/>+ Delta manifest)]
+    PRICES --> SYN[(synthetic customers<br/>and trades)]
+    PRICES --> DBT[dbt: staging → fact → marts]
+    SYN --> DBT
+    DBT --> BI[Metabase dashboard]
+    AF[Airflow] -. schedules .-> API
+    CI[GitHub Actions] -. tests and fixtures .-> DBT
+```
+
+| Layer | Tools |
+| --- | --- |
+| Ingestion | Python, `requests`, bounded retries, raw-response capture |
+| Storage | PostgreSQL 16, RustFS (S3 API), Delta Lake via `deltalake` |
+| Transformation | dbt Core: 8 models, 88 data tests |
+| Orchestration | Airflow 3 (daily ingestion, backfill, reprocessing) |
+| Serving | Metabase with a read-only database role |
+| Quality and CI | pytest, fixture reconciliation, GitHub Actions, Docker Compose |
+
+**Highlights (each recorded in [verification](docs/verification.md)):**
+
+- **Replayable ingestion:** every HTTP attempt is recorded, failed ones included; response
+  bytes and their SHA-256 are kept before parsing. Idempotency was verified by loading the same
+  captured response twice and comparing keys and values.
+- **Proven metrics:** a small fixture with hand-computed totals runs through the same
+  dbt models at four cutoffs. CI rebuilds it on a fresh database for pushes to
+  `main` and pull requests ([hosted run](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42075415267)).
+- **Operable pipeline:** Airflow backfill and reprocessing with explicit UTC
+  intervals; retries verified by injecting faults.
+- **Data lake copy:** raw responses live in S3-compatible storage under
+  content-addressed keys, with a Delta Lake manifest; reruns add no data or versions.
+
+**Not proven by this project:** real customers or users, production load, cloud
+deployment, alerting, and backup/restore. Balances, holdings and P&L are not modeled.
+
+**Contents:** [Dashboard](#dashboard-preview) ·
+[Architecture](#architecture-and-design-choices) · [Setup](#local-setup) ·
+[Prices](#collect-market-prices) · [Synthetic data](#generate-the-synthetic-dataset) ·
+[dbt](#dbt-analytics) · [Verification](#verification-and-reconciliation) ·
+[Metabase](#metabase-setup) · [Delta Lake](#delta-lake-raw-layer) ·
+[Repository guide](#repository-guide) · [Limitations](#operations-and-limitations) ·
+[Airflow](#airflow-daily-market-price-ingestion) · [CI](#continuous-integration)
 
 ## Dashboard preview
 
@@ -92,6 +134,7 @@ does not change credentials already stored in a PostgreSQL volume. Never commit
 
 ```bash
 .venv/bin/python scripts/init_metabase_env.py
+.venv/bin/python scripts/init_lake_env.py
 docker compose up -d --wait postgres
 .venv/bin/python -m pipeline.init_db
 ```
@@ -283,7 +326,7 @@ and side breakdowns.
 
 ## Verification and reconciliation
 
-Recorded runs passed **52 Python tests** and a demo dbt build with **8 models and
+Recorded runs passed **52 Python tests** (62 after stage 5A) and a demo dbt build with **8 models and
 88 data tests**. Staging, fact, daily mart, and customer summary reconciled to:
 
 | Metric | Verified demo result |
@@ -458,6 +501,44 @@ Date/asset controls were exercised in that browser; desktop Chrome/Safari layout
 was not independently verified by the agent. SMTP, email password reset, and
 public dashboard sharing are not configured.
 
+## Delta Lake raw layer
+
+PostgreSQL `raw.price_fetches` remains the system of record. This layer copies every
+HTTP attempt to object storage, so raw inputs can be kept and replayed outside the
+database that serves the dashboard. It is a data lake layer beside the warehouse,
+not a lakehouse: metrics are still defined and computed only in dbt.
+
+```text
+raw.price_fetches (PostgreSQL)
+  → bronze/coinbase/<sha256>               one object per distinct response body
+  → manifest/coinbase_price_fetches        Delta table, one row per HTTP attempt
+```
+
+```bash
+.venv/bin/python scripts/init_lake_env.py      # fills LAKE_* keys in .env once
+docker compose up -d --wait lake_storage
+.venv/bin/python -m pipeline.lake              # creates the bucket, copies, appends
+.venv/bin/python scripts/verify_lake.py        # read-only reconciliation
+```
+
+| Choice | Reason and trade-off |
+| --- | --- |
+| RustFS 1.0.3 as S3-compatible storage | The MinIO repository is archived and its Docker Hub image is gone. RustFS is Apache-2.0 and actively released; it is younger than MinIO. |
+| Content-addressed keys (`<sha256>`) | Identical responses are stored once; the key itself proves integrity. Upload uses `If-None-Match: *`, so an existing key is never overwritten. |
+| Delta manifest, one row per attempt | Keeps failed attempts (no body, no object) and request metadata; time travel shows what had been exported at each version. |
+| Insert-only MERGE on `fetch_id`, skip empty commits | A rerun adds no rows and no new Delta version. |
+| Exact Arrow schema check before writes | Delta accepted a float into a DECIMAL column and rounded it silently, so its own schema check is not enough. |
+| Python `deltalake` (delta-rs), no Spark | Hundreds of rows do not need a distributed engine or a JVM. |
+
+Observed on 2026-11-09: 41 raw attempts, 25 distinct bodies → 25 objects (66,768
+raw body bytes) and 41 manifest rows at Delta version 0. A rerun uploaded 0 objects,
+inserted 0 rows and kept version 0; PostgreSQL raw rows were unchanged. Verification
+caught an intentionally corrupted object and passed again after restoring its bytes
+from PostgreSQL. Details: [verification](docs/verification.md).
+
+Read Delta tables on S3 through `QueryBuilder` (SQL), not `to_pyarrow_table()`.
+With deltalake 1.6.6 on RustFS the latter returned data but the process hung at exit.
+
 ## Repository guide
 
 | Path | Purpose |
@@ -471,6 +552,7 @@ public dashboard sharing are not configured.
 | `scripts/run_dbt.py`, `scripts/verify_dbt.py`, `compose.test.yaml` | dbt environment wrapper and isolated integration checks |
 | `metabase/cards/`, `scripts/setup_metabase*.py` | Dashboard SQL, provisioning, and reader-role setup |
 | `scripts/verify_metabase.py`, `sql/verify*.sql` | API-to-SQL checks and independent reconciliation queries |
+| `pipeline/lake.py`, `scripts/verify_lake.py`, `scripts/init_lake_env.py` | Raw objects in S3-compatible storage, Delta manifest, and reconciliation |
 | `tests/fixtures/reconciliation/` | Small fixture and independent expected totals |
 | `compose.yaml`, `.env.example` | Services and environment configuration |
 | `docs/` | Design decisions, model contracts, and verification records |
@@ -492,6 +574,9 @@ Do not delete volumes or data to resolve startup errors.
 - Isolated fresh migrations and fixture builds were tested. A complete pipeline
   run from an empty clone, backup/restore, metadata-database restart, and failure
   recovery have not been verified.
+- The Delta Lake layer is exported manually and covers raw price responses only.
+  Silver prices, published report snapshots, CI against object storage, AWS S3
+  and concurrent writers are not implemented or tested.
 - dbt tables require rebuilding after source updates. Incremental models,
   historical snapshots, SCD2, retention, RFM scoring, and AI agents are outside
   the current implementation.
@@ -631,7 +716,7 @@ pushes to `main`, and manual dispatch. It defines three checks:
 
 | Check | Environment | What it verifies |
 | --- | --- | --- |
-| Python tests | Python 3.12 and 3.13 on Ubuntu 24.04 | Collector mocks, UTC boundaries, money/fixtures, orchestration adapters, and CI isolation guards |
+| Python tests | Python 3.12 and 3.13 on Ubuntu 24.04 | Collector mocks, UTC boundaries, money/fixtures, orchestration adapters, CI isolation guards, and Delta manifest writes on a local path |
 | dbt reconciliation | Python 3.12, PostgreSQL 16 service | Fresh migrations and rerun, four fixture cutoffs, independent totals, and output-schema protection |
 | Airflow DAG contract | Pinned Airflow 3.3.2 image | Production DAG imports and task/schedule limits, with container networking disabled |
 

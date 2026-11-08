@@ -37,6 +37,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
+            requirements-lake.txt
       - name: Install test dependencies
         run: |
           python -m venv .venv
@@ -89,6 +90,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
+            requirements-lake.txt
             requirements-dbt.txt
       - name: Install collector and dbt in separate environments
         run: |
