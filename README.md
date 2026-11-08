@@ -1,20 +1,60 @@
 # Investment Data Pipeline & Analytics
 
-A local batch pipeline that takes data from an API to an analytics dashboard, with
-reconciliation across raw storage, normalized tables, facts, and marts.
+A batch data pipeline for a simulated crypto brokerage: real market prices from an
+API, through raw storage and dbt models, to a dashboard of trading volume and fee
+revenue. The focus is on numbers that can be proven correct: dbt models and dashboard
+cards are reconciled against independent SQL and fixture totals, and reruns are
+checked to change nothing.
 
-Daily BTC, ETH, and SOL candles come from **Coinbase Exchange**. The customer and
-execution data—**1,000 customers and 50,000 matched trades—are entirely synthetic**.
-They provide a controlled dataset for testing aggregations, monetary calculations,
-and customer activity summaries.
+> **Data honesty:** BTC/ETH/SOL daily prices are real (Coinbase Exchange). The 1,000
+> customers and 50,000 trades are **synthetic**, generated with a fixed seed so
+> aggregations can be checked against known answers.
 
-**Stack:** Python, PostgreSQL, dbt Core, Metabase, Docker Compose, and optional
-Airflow orchestration. Daily price ingestion can run on a schedule; the fixed
-analytics demo is built manually. GitHub Actions checks are verified on hosted
-Ubuntu runners; see the CI verification link below. Raw API responses are also
-copied to S3-compatible object storage with a Delta Lake manifest (see
-[Delta Lake raw layer](#delta-lake-raw-layer)).
-The project does not model balances, holdings, or P&L.
+```mermaid
+flowchart LR
+    API[Coinbase API] --> RAW[(raw responses<br/>bytes + SHA-256)]
+    RAW --> PRICES[(daily prices<br/>UTC, Decimal)]
+    RAW -. copy .-> LAKE[(S3 object storage<br/>+ Delta manifest)]
+    PRICES --> SYN[(synthetic customers<br/>and trades)]
+    PRICES --> DBT[dbt: staging → fact → marts]
+    SYN --> DBT
+    DBT --> BI[Metabase dashboard]
+    AF[Airflow] -. schedules .-> API
+    CI[GitHub Actions] -. tests and fixtures .-> DBT
+```
+
+| Layer | Tools |
+| --- | --- |
+| Ingestion | Python, `requests`, bounded retries, raw-response capture |
+| Storage | PostgreSQL 16, RustFS (S3 API), Delta Lake via `deltalake` |
+| Transformation | dbt Core: 8 models, 88 data tests |
+| Orchestration | Airflow 3 (daily ingestion, backfill, reprocessing) |
+| Serving | Metabase with a read-only database role |
+| Quality and CI | pytest, fixture reconciliation, GitHub Actions, Docker Compose |
+
+**Highlights (each recorded in [verification](docs/verification.md)):**
+
+- **Replayable ingestion:** every HTTP attempt is recorded, failed ones included; response
+  bytes and their SHA-256 are kept before parsing. Idempotency was verified by loading the same
+  captured response twice and comparing keys and values.
+- **Proven metrics:** a small fixture with hand-computed totals runs through the same
+  dbt models at four cutoffs. CI rebuilds it on a fresh database for pushes to
+  `main` and pull requests ([hosted run](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42075415267)).
+- **Operable pipeline:** Airflow backfill and reprocessing with explicit UTC
+  intervals; retries verified by injecting faults.
+- **Data lake copy:** raw responses live in S3-compatible storage under
+  content-addressed keys, with a Delta Lake manifest; reruns add no data or versions.
+
+**Not proven by this project:** real customers or users, production load, cloud
+deployment, alerting, and backup/restore. Balances, holdings and P&L are not modeled.
+
+**Contents:** [Dashboard](#dashboard-preview) ·
+[Architecture](#architecture-and-design-choices) · [Setup](#local-setup) ·
+[Prices](#collect-market-prices) · [Synthetic data](#generate-the-synthetic-dataset) ·
+[dbt](#dbt-analytics) · [Verification](#verification-and-reconciliation) ·
+[Metabase](#metabase-setup) · [Delta Lake](#delta-lake-raw-layer) ·
+[Repository guide](#repository-guide) · [Limitations](#operations-and-limitations) ·
+[Airflow](#airflow-daily-market-price-ingestion) · [CI](#continuous-integration)
 
 ## Dashboard preview
 
@@ -286,7 +326,7 @@ and side breakdowns.
 
 ## Verification and reconciliation
 
-Recorded runs passed **52 Python tests** and a demo dbt build with **8 models and
+Recorded runs passed **52 Python tests** (62 after stage 5A) and a demo dbt build with **8 models and
 88 data tests**. Staging, fact, daily mart, and customer summary reconciled to:
 
 | Metric | Verified demo result |
