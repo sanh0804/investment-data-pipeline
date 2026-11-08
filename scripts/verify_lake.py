@@ -1,7 +1,11 @@
 """Reconcile the Delta manifest, bronze objects and silver prices with PostgreSQL.
 
-Read-only: compares every manifest field with PostgreSQL, checks that each object's
-bytes hash to its key, and that the bucket holds exactly one object per distinct hash.
+Read-only for PostgreSQL and the bucket: compares every manifest field with
+PostgreSQL, checks that each object's bytes hash to its key and that the bucket holds
+exactly one object per distinct hash, compares silver with market.daily_prices (and a
+rebuild in a temporary local directory), and checks every publication: its versions
+reproduce rows that match the logged totals, and the latest one per dataset equals
+the current dbt marts when their cutoff is unchanged.
 """
 import hashlib
 import json
@@ -18,6 +22,7 @@ from pipeline.db import connect
 from pipeline.lake import (BRONZE_PREFIX, RAW_QUERY, check_table_schema, load_lake_settings,
                            manifest_row, open_table, query, s3_client)
 from pipeline.lake_prices import KEY, PRICES_PATH, PRICES_SCHEMA, build
+from pipeline.lake_publish import REPORTS, Lake, content, publications, read_mart, reproduce
 
 
 def check(value, message):
@@ -30,6 +35,34 @@ def bucket_keys(s3, bucket):
     for page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=BRONZE_PREFIX):
         keys += [item['Key'] for item in page.get('Contents', [])]
     return keys
+
+
+def verify_publications(settings):
+    lake = Lake(f's3://{settings.bucket}', settings.storage_options())
+    log = publications(lake)
+    latest = {}
+    for pub in log:
+        rows = reproduce(lake, pub['publication_id'])  # also checks publication_id per version
+        daily = rows['daily_trading']
+        check((pub['daily_rows'], pub['customer_rows'], pub['trade_count'], pub['trade_volume_usd'], pub['fees_usd']) ==
+              (len(daily), len(rows['customer_summary']), sum(r['trade_count'] for r in daily),
+               sum(r['trade_volume_usd'] for r in daily), sum(r['fees_usd'] for r in daily)),
+              f"logged totals differ from published rows: {pub['publication_id']}")
+        latest[pub['dataset_id']] = (pub, rows)
+    current = {}
+    with connect() as conn:
+        for dataset_id, (pub, rows) in latest.items():
+            source = {name: read_mart(conn, pub['source_schema'], spec['mart'], dataset_id,
+                                      [f.name for f in spec['schema'] if f.name != 'publication_id'])
+                      for name, spec in REPORTS.items()}
+            cutoffs = {r['as_of_date'] for r in source['daily_trading']}
+            if cutoffs != {pub['as_of_date']}:
+                current[dataset_id] = f'marts now at {sorted(cutoffs)}; not compared'
+                continue
+            check(all(content(rows[n], s['key']) == content(source[n], s['key']) for n, s in REPORTS.items()),
+                  f'latest publication of {dataset_id} differs from current marts')
+            current[dataset_id] = 'equals current marts'
+    return {'publications': len(log), 'latest_vs_marts': current}
 
 
 PRICE_QUERY = '''
@@ -96,6 +129,7 @@ def main():
 
     report = {'raw_rows': len(raws), 'manifest_rows': counts['n'],
               'silver': verify_silver(settings, s3),
+              'gold': verify_publications(settings),
               'manifest_version': table.version(), 'distinct_hashes': len(hashes),
               'objects': len(keys), 'attempts_without_body': sum(r['object_key'] is None for r in expected.values()),
               'raw_body_bytes': sum(r['body_bytes'] or 0 for r in expected.values()), 'passed': True}

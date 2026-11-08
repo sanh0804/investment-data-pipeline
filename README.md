@@ -14,7 +14,8 @@ checked to change nothing.
 flowchart LR
     API[Coinbase API] --> RAW[(raw responses<br/>bytes + SHA-256)]
     RAW --> PRICES[(daily prices<br/>UTC, Decimal)]
-    RAW -. copy .-> LAKE[(S3 object storage<br/>+ Delta manifest)]
+    RAW -. copy .-> LAKE[(Delta Lake on S3<br/>raw, prices, reports)]
+    DBT -. publish .-> LAKE
     PRICES --> SYN[(synthetic customers<br/>and trades)]
     PRICES --> DBT[dbt: staging → fact → marts]
     SYN --> DBT
@@ -42,8 +43,9 @@ flowchart LR
   `main` and pull requests ([hosted run](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42075415267)).
 - **Operable pipeline:** Airflow backfill and reprocessing with explicit UTC
   intervals; retries verified by injecting faults.
-- **Data lake copy:** raw responses live in S3-compatible storage under
-  content-addressed keys, with a Delta Lake manifest; reruns add no data or versions.
+- **Auditable reports:** raw responses, rebuilt prices and each published report are
+  versioned in Delta Lake on S3-compatible storage. A past report can be read back
+  exactly, and a correction is explained row by row by a diff.
 
 **Not proven by this project:** real customers or users, production load, cloud
 deployment, alerting, and backup/restore. Balances, holdings and P&L are not modeled.
@@ -52,7 +54,7 @@ deployment, alerting, and backup/restore. Balances, holdings and P&L are not mod
 [Architecture](#architecture-and-design-choices) · [Setup](#local-setup) ·
 [Prices](#collect-market-prices) · [Synthetic data](#generate-the-synthetic-dataset) ·
 [dbt](#dbt-analytics) · [Verification](#verification-and-reconciliation) ·
-[Metabase](#metabase-setup) · [Delta Lake](#delta-lake-raw-layer) ·
+[Metabase](#metabase-setup) · [Delta Lake](#delta-lake-layer) ·
 [Repository guide](#repository-guide) · [Limitations](#operations-and-limitations) ·
 [Airflow](#airflow-daily-market-price-ingestion) · [CI](#continuous-integration)
 
@@ -501,43 +503,65 @@ Date/asset controls were exercised in that browser; desktop Chrome/Safari layout
 was not independently verified by the agent. SMTP, email password reset, and
 public dashboard sharing are not configured.
 
-## Delta Lake raw layer
+## Delta Lake layer
 
-PostgreSQL `raw.price_fetches` remains the system of record. This layer copies every
-HTTP attempt to object storage, so raw inputs can be kept and replayed outside the
-database that serves the dashboard. It is a data lake layer beside the warehouse,
-not a lakehouse: metrics are still defined and computed only in dbt.
+dbt rebuilds analytics tables in place, so a report that was published last week is
+gone once the tables change. This layer answers three audit questions with evidence:
+what did a published report show, why did a number change, and can prices be
+rebuilt from raw inputs alone? It is a data lake layer beside the warehouse, not a
+lakehouse: metrics are defined and computed only in dbt; the lake stores raw inputs,
+rebuilt prices and copies of published reports.
 
 ```text
-raw.price_fetches (PostgreSQL)
-  → bronze/coinbase/<sha256>               one object per distinct response body
-  → manifest/coinbase_price_fetches        Delta table, one row per HTTP attempt
+raw.price_fetches (PostgreSQL, system of record)
+  → bronze/coinbase/<sha256>            one object per distinct response body
+  → manifest/coinbase_price_fetches     Delta: one row per HTTP attempt
+  → silver/prices                       Delta: rebuilt with pipeline.normalize
+analytics marts (dbt)
+  → gold/daily_trading, gold/customer_summary   one Delta version per publish
+  → gold/publications                   log: cutoff, git SHA, versions, totals
 ```
 
 ```bash
 .venv/bin/python scripts/init_lake_env.py      # fills LAKE_* keys in .env once
 docker compose up -d --wait lake_storage
-.venv/bin/python -m pipeline.lake              # creates the bucket, copies, appends
+.venv/bin/python -m pipeline.lake              # bronze objects + manifest
+.venv/bin/python -m pipeline.lake_prices       # silver prices from bronze
+.venv/bin/python -m pipeline.lake_publish publish --dataset-id portfolio-v1
+.venv/bin/python -m pipeline.lake_publish list
+.venv/bin/python -m pipeline.lake_publish diff <old_publication_id> <new_publication_id>
 .venv/bin/python scripts/verify_lake.py        # read-only reconciliation
+.venv/bin/python scripts/verify_lake_audit.py  # fixture audit demo (test DB, separate bucket)
 ```
 
 | Choice | Reason and trade-off |
 | --- | --- |
 | RustFS 1.0.3 as S3-compatible storage | The MinIO repository is archived and its Docker Hub image is gone. RustFS is Apache-2.0 and actively released; it is younger than MinIO. |
 | Content-addressed keys (`<sha256>`) | Identical responses are stored once; the key itself proves integrity. Upload uses `If-None-Match: *`, so an existing key is never overwritten. |
-| Delta manifest, one row per attempt | Keeps failed attempts (no body, no object) and request metadata; time travel shows what had been exported at each version. |
-| Insert-only MERGE on `fetch_id`, skip empty commits | A rerun adds no rows and no new Delta version. |
-| Exact Arrow schema check before writes | Delta accepted a float into a DECIMAL column and rounded it silently, so its own schema check is not enough. |
-| Python `deltalake` (delta-rs), no Spark | Hundreds of rows do not need a distributed engine or a JVM. |
+| Silver rule: latest covering successful attempt wins | Reproduces all 555 PostgreSQL price rows, including `last_fetch_id`. Parsing reuses `pipeline.normalize`, so there is one definition of a valid candle. |
+| Publish copies dbt marts; no metric SQL in the lake | Avoids two definitions that drift. The copy is reconciled with PostgreSQL. |
+| One Delta version per publish, plus a publications log | Time travel reproduces a past report; the log records which versions hold it and its totals. Delta has no multi-table transaction, so the log is written last. |
+| Write only new or changed rows | Reruns and identical republishes create no rows, publications or Delta versions. |
+| Exact Arrow schema check before writes | Delta accepted a float into a DECIMAL column and rounded it silently. Money is DECIMAL(38,2) and prices DECIMAL(38,18); finer values are rejected. |
+| Python `deltalake` (delta-rs), no Spark | Hundreds to thousands of rows do not need a distributed engine or a JVM. |
 
-Observed on 2026-11-09: 41 raw attempts, 25 distinct bodies → 25 objects (66,768
-raw body bytes) and 41 manifest rows at Delta version 0. A rerun uploaded 0 objects,
-inserted 0 rows and kept version 0; PostgreSQL raw rows were unchanged. Verification
-caught an intentionally corrupted object and passed again after restoring its bytes
-from PostgreSQL. Details: [verification](docs/verification.md).
+Observed on 2026-11-09 (details in [verification](docs/verification.md)):
+
+- Bronze: 41 raw attempts → 25 objects and 41 manifest rows. A rerun changed nothing;
+  an intentionally corrupted object was detected.
+- Silver: 555 rows equal to `market.daily_prices`; a rebuild into an empty location
+  matched; a rerun kept version 0.
+- Gold: `portfolio-v1` published once at the 2026-10-27 cutoff (116 daily rows, 1,000
+  customers, 50,000 trades, USD 615,063,969.51 volume, USD 615,063.60 fees), equal to
+  the current marts; republishing created nothing.
+- Audit demo on the fixture: publications at four cutoffs, then a corrected trade
+  quantity (10 → 12). The diff listed exactly one changed day (USD 155.00 → 175.00,
+  fees 0.16 → 0.18) and one changed customer, matching amounts computed from the CSV.
+  All five publications, including the superseded one, still reproduce their dbt output.
 
 Read Delta tables on S3 through `QueryBuilder` (SQL), not `to_pyarrow_table()`.
 With deltalake 1.6.6 on RustFS the latter returned data but the process hung at exit.
+Time travel needs the old files: do not run VACUUM below the retention window.
 
 ## Repository guide
 
@@ -552,7 +576,7 @@ With deltalake 1.6.6 on RustFS the latter returned data but the process hung at 
 | `scripts/run_dbt.py`, `scripts/verify_dbt.py`, `compose.test.yaml` | dbt environment wrapper and isolated integration checks |
 | `metabase/cards/`, `scripts/setup_metabase*.py` | Dashboard SQL, provisioning, and reader-role setup |
 | `scripts/verify_metabase.py`, `sql/verify*.sql` | API-to-SQL checks and independent reconciliation queries |
-| `pipeline/lake.py`, `scripts/verify_lake.py`, `scripts/init_lake_env.py` | Raw objects in S3-compatible storage, Delta manifest, and reconciliation |
+| `pipeline/lake*.py`, `scripts/verify_lake*.py`, `scripts/init_lake_env.py` | Delta Lake layer: raw objects and manifest, silver prices, report publications, reconciliation and audit demo |
 | `tests/fixtures/reconciliation/` | Small fixture and independent expected totals |
 | `compose.yaml`, `.env.example` | Services and environment configuration |
 | `docs/` | Design decisions, model contracts, and verification records |
@@ -574,11 +598,11 @@ Do not delete volumes or data to resolve startup errors.
 - Isolated fresh migrations and fixture builds were tested. A complete pipeline
   run from an empty clone, backup/restore, metadata-database restart, and failure
   recovery have not been verified.
-- The Delta Lake layer is exported manually and covers raw price responses only.
-  Silver prices, published report snapshots, CI against object storage, AWS S3
-  and concurrent writers are not implemented or tested.
+- The Delta Lake layer runs manually (no schedule). CI runs its unit tests, not
+  object-storage integration. AWS S3, concurrent writers, VACUUM/retention policy
+  and bucket backup are not implemented or tested.
 - dbt tables require rebuilding after source updates. Incremental models,
-  historical snapshots, SCD2, retention, RFM scoring, and AI agents are outside
+  dbt snapshots (SCD2), retention, RFM scoring, and AI agents are outside
   the current implementation.
 
 See [verification](docs/verification.md) for executed checks and remaining gaps.

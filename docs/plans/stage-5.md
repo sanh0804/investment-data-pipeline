@@ -1,7 +1,7 @@
 # Stage 5 plan — Delta Lake audit layer (S3-compatible storage + Delta Lake, no Spark)
 
-Status: 5A implemented and verified (local and GitHub-hosted CI); 5B–5C in progress;
-5D deferred.
+Status: 5A verified locally and in GitHub-hosted CI; 5B–5C implemented and verified
+locally; 5D deferred.
 Keep scope small: PostgreSQL/dbt remains the warehouse and the place where metrics
 are defined. This is a data lake layer beside it, not a lakehouse.
 
@@ -65,7 +65,7 @@ Not verified: AWS S3, concurrent writers.
 - PostgreSQL raw rows are preserved; this is a copy, not a move.
 - Check: object count equals distinct SHA-256 count; each object's hash matches.
 
-### 5B — Silver: prices rebuilt from bronze
+### 5B — Silver: prices rebuilt from bronze (implemented)
 
 - Read successful attempts from the manifest, fetch their objects (hash rechecked),
   and parse them with the existing `pipeline.normalize` for the request window.
@@ -81,7 +81,7 @@ Not verified: AWS S3, concurrent writers.
 - Checks: silver equals `market.daily_prices` row for row; rerun keeps the version;
   a rebuild into an empty location equals the current table.
 
-### 5C — Gold: published report snapshots and audit
+### 5C — Gold: published report snapshots and audit (implemented)
 
 - `publish` copies `mart_daily_trading` and `mart_customer_summary` for one dataset
   into Delta `gold/` tables (replacing that dataset's rows; one Delta version per

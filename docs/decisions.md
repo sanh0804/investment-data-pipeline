@@ -359,3 +359,44 @@ boto3/delta-rs nên đổi storage chỉ cần đổi endpoint/credentials.
 `requirements-dev.txt` include; image Airflow không cài các gói này. Chọn bản phát
 hành ít nhất hai tuần. Credentials `LAKE_*` do `init_lake_env.py` sinh vào `.env`;
 storage chỉ bind 127.0.0.1. `AWS_ALLOW_HTTP` chỉ bật khi endpoint là http local.
+
+## Silver prices (5B)
+
+- Quy tắc chọn: với mỗi (source, product_id, price_date), attempt thành công mới nhất
+  có cửa sổ request bao phủ ngày đó thắng (fetched_at, rồi fetch_id). Đã kiểm tra trên
+  PostgreSQL trước khi code: quy tắc tái tạo đủ 555/555 dòng, kể cả last_fetch_id.
+  Nếu collector sau này đổi thứ tự ghi (ví dụ replay response cũ), quy tắc này phải
+  được kiểm tra lại; verify_lake.py sẽ báo lệch.
+- Parse bằng chính `pipeline.normalize`; không có định nghĩa candle thứ hai. Body 200
+  không qua validation bị bỏ qua và liệt kê trong `rejected_attempts` (hiện 0).
+- Giá và volume DECIMAL(38,18): PostgreSQL NUMERIC không giới hạn, dữ liệu thật có
+  scale 2 (giá) và 8 (volume). pyarrow từ chối giá trị mất chữ số, không làm tròn.
+- Upsert chỉ ghi dòng mới hoặc khác (so sánh Decimal theo giá trị: 1.5 == 1.500…),
+  nên rerun không tạo version rỗng. Dòng không còn trong input không bị xóa.
+
+## Published report snapshots (5C)
+
+Vấn đề: dbt build ghi đè mart; báo cáo đã gửi đi không đọc lại được nếu không restore.
+
+- `publish` copy mart_daily_trading và mart_customer_summary của một dataset vào
+  gold Delta, thay đúng các dòng của dataset bằng overwrite có predicate (Delta từ
+  chối dòng ngoài predicate). Mỗi publish là một version; `gold/publications` ghi
+  publication_id, as_of_date, source schema, git SHA (kèm `-dirty` nếu worktree có
+  thay đổi), versions, row counts và totals.
+- Không tính lại metric trong lake. Gold là bản copy và được đối soát với PostgreSQL.
+  Postgres không khai báo NOT NULL cho mart; schema Delta tự áp ràng buộc theo
+  contract trong models.md (chỉ ngày/recency của khách chưa trade được NULL).
+- Nội dung giống bản publish gần nhất thì không publish lại (so theo key, bỏ
+  publication_id). Thứ tự publications dựa vào version của daily_trading, không dựa
+  vào published_at, vì timestamp có thể trùng hoặc lệch đồng hồ.
+- Không có transaction nhiều bảng: ghi gold trước, log sau. Crash ở giữa để lại gold
+  mới hơn log; `reproduce` kiểm tra publication_id trong đúng version nên phát hiện.
+- Time travel cần file cũ còn tồn tại; VACUUM dưới retention sẽ làm mất bản cũ. Log
+  giữ totals để phát hiện. Nếu cần lưu trữ pháp lý dài hạn, append-only snapshot theo
+  publication_id bền hơn time travel; ở đây chọn time travel để giữ bảng gọn.
+- Demo audit chạy trên fixture trong test PostgreSQL và bucket `<LAKE_BUCKET>-fixture`
+  với prefix theo run; không ghi vào database demo hoặc bucket live. `portfolio-v1`
+  chỉ publish một lần ở cutoff 2026-10-27. Bản sửa demo (trade 3: quantity 10 → 12)
+  chỉ áp vào bảng fixture_input của test DB.
+- 5D (CI chạy RustFS) hoãn: unit tests của lake đã chạy trong CI; integration với
+  object storage được kiểm chứng local.
