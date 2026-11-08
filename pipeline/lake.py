@@ -46,9 +46,9 @@ MANIFEST_SCHEMA = pa.schema([
     pa.field("transport_error", pa.string()),
     pa.field("exported_at", UTC_MICROS, nullable=False),
 ])
-# Delta's own type names for the same columns; used to detect a drifted table.
+# Delta's own type names for Arrow types used here; used to detect a drifted table.
 DELTA_TYPES = {pa.string(): "string", pa.int32(): "integer", pa.int64(): "long",
-               UTC_MICROS: "timestamp"}
+               pa.date32(): "date", UTC_MICROS: "timestamp"}
 
 RAW_QUERY = """
     SELECT fetch_id, run_id, attempt_number, source, product_id, endpoint,
@@ -139,24 +139,74 @@ def manifest_row(raw, exported_at):
 
 
 def manifest_table(rows):
-    table = pa.Table.from_pylist(rows, schema=MANIFEST_SCHEMA)
-    check_schema(table.schema)
+    return arrow_table(rows, MANIFEST_SCHEMA)
+
+
+def arrow_table(rows, schema):
+    # pyarrow rejects Decimal values that would lose digits (scale/precision) here.
+    table = pa.Table.from_pylist(rows, schema=schema)
+    check_schema(table.schema, schema)
     return table
 
 
-def check_schema(schema):
+def check_schema(schema, expected=MANIFEST_SCHEMA):
     # Delta casts compatible types on write (a float becomes a rounded DECIMAL), so
     # require the exact Arrow schema rather than relying on Delta's checks.
-    if not schema.equals(MANIFEST_SCHEMA):
-        raise ValueError(f"manifest schema mismatch:\n{schema}\nexpected:\n{MANIFEST_SCHEMA}")
+    if not schema.equals(expected):
+        raise ValueError(f"schema mismatch:\n{schema}\nexpected:\n{expected}")
 
 
-def check_table_schema(table):
+def delta_type(arrow_type):
+    if pa.types.is_decimal(arrow_type):
+        return f"decimal({arrow_type.precision},{arrow_type.scale})"
+    return DELTA_TYPES[arrow_type]
+
+
+def check_table_schema(table, expected=MANIFEST_SCHEMA):
     actual = [(f.name, str(f.type), f.nullable) for f in table.schema().fields]
-    expected = [(f.name, f'PrimitiveType("{DELTA_TYPES[f.type]}")', f.nullable)
-                for f in MANIFEST_SCHEMA]
-    if actual != expected:
-        raise ValueError(f"Delta manifest schema drifted: {actual}")
+    wanted = [(f.name, f'PrimitiveType("{delta_type(f.type)}")', f.nullable) for f in expected]
+    if actual != wanted:
+        raise ValueError(f"Delta table schema drifted: {actual}")
+
+
+def read_object(s3, bucket, key):
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    if hashlib.sha256(body).hexdigest() != key.removeprefix(BRONZE_PREFIX):
+        raise ValueError(f"object {key} does not match its hash")
+    return body
+
+
+def open_table(uri, storage_options, schema):
+    if not DeltaTable.is_deltatable(uri, storage_options=storage_options):
+        return None
+    table = DeltaTable(uri, storage_options=storage_options)
+    check_table_schema(table, schema)
+    return table
+
+
+def upsert_changed(uri, storage_options, schema, key, rows):
+    """Write only rows that are new or differ from the stored row with the same key.
+
+    Comparing first avoids empty Delta versions on reruns; MERGE then applies the
+    difference atomically. Rows absent from the input are left untouched.
+    """
+    table = open_table(uri, storage_options, schema)
+    stored = {}
+    if table is not None:
+        stored = {tuple(r[k] for k in key): r for r in query(table, "SELECT * FROM t").to_pylist()}
+    # Decimal and aware-datetime equality compare values, so a stored 1.500000 (scale
+    # 18) equals an input 1.5 and a ZoneInfo("UTC") timestamp equals timezone.utc.
+    changed = [r for r in rows if stored.get(tuple(r[k] for k in key)) != r]
+    if not changed:
+        return 0, table.version() if table else None
+    data = arrow_table(changed, schema)
+    if table is None:
+        write_deltalake(uri, data, mode="error", storage_options=storage_options)
+    else:
+        condition = " AND ".join(f"t.{k} = s.{k}" for k in key)
+        (table.merge(data, condition, source_alias="s", target_alias="t")
+         .when_matched_update_all().when_not_matched_insert_all().execute())
+    return len(changed), DeltaTable(uri, storage_options=storage_options).version()
 
 
 def ensure_bucket(s3, bucket):
@@ -187,10 +237,9 @@ def query(table, sql):
 
 
 def existing_fetch_ids(uri, storage_options):
-    if not DeltaTable.is_deltatable(uri, storage_options=storage_options):
+    table = open_table(uri, storage_options, MANIFEST_SCHEMA)
+    if table is None:
         return set(), None
-    table = DeltaTable(uri, storage_options=storage_options)
-    check_table_schema(table)
     return set(query(table, "SELECT fetch_id FROM t").column("fetch_id").to_pylist()), table
 
 
