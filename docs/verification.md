@@ -869,3 +869,13 @@ hoặc deployment. Không mở rộng scope ngoài4A/4B.
   của bucket, hoặc backup/restore volume `lake_data`.
 - Nguyên nhân treo của đường pyarrow chưa xác định (delta-rs hay RustFS).
 - Silver prices, published report snapshots và diff (5B–5C) chưa triển khai.
+
+### GitHub-hosted CI cho 5A — 2026-11-09
+
+PR #1 (branch readme-summary: commit 5A `dc1c9c1` + README `1bd70f9`) chạy
+[run 42514070425](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42514070425)
+trên SHA `1bd70f9`: bốn jobs success. Đã tải và đọc JUnit: Python3.12 và 3.13 mỗi bản
+62 tests, 0 failures/errors/skips, trong đó 10 test `test_lake`. User merge PR trên
+GitHub thành merge commit `95abef8` (nội dung giống `1bd70f9`); run
+[42514544383](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42514544383)
+trên main success. CI vẫn chưa chạy với object storage service.

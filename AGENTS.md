@@ -3,7 +3,7 @@
 Personal portfolio project for Data Engineering / Data Analytics roles, on macOS.
 
 ## Scope and working rules
-- Current authorized scope: stage 5A — copy raw Coinbase responses (including unsuccessful attempts) from PostgreSQL to content-addressed objects in local S3-compatible storage (RustFS; MinIO is archived), with a Delta Lake manifest written by the Python `deltalake` package. 5A is implemented; stop for review before 5B. Plan: docs/plans/stage-5.md.
+- Current authorized scope: stages 5B–5C — silver prices rebuilt from the bronze objects, and published dbt mart snapshots with time travel and diff, demonstrated on fixture data in a separate bucket and test database. 5A (raw objects in local RustFS plus a Delta manifest) is implemented. 5D (CI against object storage) is deferred. Stop after 5C for review. Plan: docs/plans/stage-5.md.
 - Stack: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose, GitHub Actions; stage 5 adds RustFS object storage and Delta Lake (delta-rs, no Spark/JVM). Stages 1–4B are implemented and verified.
 - Do not implement Spark, AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L. Keep portfolio-v1, dbt cutoff and dashboard fixed; do not schedule synthetic regeneration or dbt builds.
 - The Delta layer stores raw objects, normalized prices and published dbt snapshots only; never reimplement dbt metrics. Compare the exact Arrow schema before every Delta write (lossy float→DECIMAL casts are accepted silently). Read Delta tables on S3 only through `QueryBuilder`; `to_pyarrow_*` reads hung at process exit. Never overwrite bronze objects. Call it a Delta Lake / data lake layer beside the warehouse, not a lakehouse.
