@@ -18,7 +18,7 @@ Personal portfolio project for Data Engineering / Data Analytics roles, on macOS
 - Never delete volumes or data to fix an error. Diagnose first; any destructive change needs explicit user authorization.
 - Verify idempotency using the exact same captured response twice. Check key counts and values, not only process exit status.
 - Run focused tests and real integration checks when available. Report executed versus unexecuted checks honestly.
-- Maintain README.md, docs/decisions.md and docs/verification.md when behavior or evidence changes. docs/learning-notes.md is a personal, local-only study note; keep it untracked and update it when available.
+- Maintain README.md (short, recruiter-facing: summary, verified results, quick start; keep it under ~200 lines), docs/runbook.md (step-by-step commands), docs/decisions.md and docs/verification.md when behavior or evidence changes. Every number in the README needs evidence in docs/verification.md. docs/learning-notes.md is a personal, local-only study note; keep it untracked and update it when available.
 - Keep migrations additive and preserve stage 1 data. Synthetic tables live in a separate schema; test fixtures stay in tests/fixtures and must never load into live price tables.
 - Use fixed seeds/dates and stable IDs for synthetic data; document price/fee rounding and daily-close assumptions. Verify row values, orphan keys and customer/trade time ordering on rerun.
 - At the end of each stage, explain the flow, main files, three core concepts and three interview questions in Vietnamese.
