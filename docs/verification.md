@@ -935,3 +935,10 @@ trên main success. CI vẫn chưa chạy với object storage service.
 - Chưa có lịch chạy, VACUUM/retention policy, AWS S3, concurrent writers hoặc
   backup bucket. Test DB và prefix fixture được giữ lại, không xóa.
 - Diff chỉ so hai publication cùng dataset; chưa có giao diện xem audit.
+
+### GitHub-hosted CI cho 5B–5C — 2026-11-09
+
+PR #2 (branch stage-5bc, SHA `78a0745`)
+[run 42564259935](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42564259935):
+bốn jobs success. Đã tải và đọc JUnit: Python3.12 và 3.13 mỗi bản 70 tests,
+0 failures/errors/skips. CI vẫn không chạy object storage (5D hoãn).

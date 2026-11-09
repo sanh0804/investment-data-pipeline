@@ -70,7 +70,7 @@ Each row was executed and recorded with commands and outputs in
 | Data lake: raw | 41 raw attempts → 25 content-addressed objects; a rerun changed nothing; an injected object corruption was detected |
 | Data lake: rebuild | All 555 daily price rows rebuilt from raw objects equal the warehouse table |
 | Data lake: audit | After a simulated trade correction, the diff listed exactly one day and one customer (USD 155.00 → 175.00); all five published reports read back exactly |
-| Tests and CI | 70 Python tests pass locally and in the Linux CI container; the last GitHub-hosted run passed 62 on Python 3.12 and 3.13 |
+| Tests and CI | 70 Python tests pass in GitHub Actions on Python 3.12 and 3.13, with fresh migrations, dbt fixture reconciliation and DAG checks ([run](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42564259935)) |
 
 ## Dashboard preview
 
