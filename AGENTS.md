@@ -3,10 +3,10 @@
 Personal portfolio project for Data Engineering / Data Analytics roles, on macOS.
 
 ## Scope and working rules
-- Current authorized scope: stage 5A — copy raw Coinbase responses (including unsuccessful attempts) from PostgreSQL to content-addressed objects in local S3-compatible storage (RustFS; MinIO is archived), with a Delta Lake manifest written by the Python `deltalake` package. 5A is implemented; stop for review before 5B. Plan: docs/plans/stage-5.md.
+- Current authorized scope: stage 5 (Delta Lake layer) — 5A bronze objects and manifest, 5B silver prices, 5C published report snapshots with time travel and diff are implemented. 5D (CI against object storage) is deferred. Stop for review; no new stage without approval. Plan: docs/plans/stage-5.md.
 - Stack: Python, PostgreSQL, dbt Core, Airflow, Metabase, Docker Compose, GitHub Actions; stage 5 adds RustFS object storage and Delta Lake (delta-rs, no Spark/JVM). Stages 1–4B are implemented and verified.
 - Do not implement Spark, AI agents, SCD2, retention, RFM scoring, balances, holdings or P&L. Keep portfolio-v1, dbt cutoff and dashboard fixed; do not schedule synthetic regeneration or dbt builds.
-- The Delta layer stores raw objects, normalized prices and published dbt snapshots only; never reimplement dbt metrics. Compare the exact Arrow schema before every Delta write (lossy float→DECIMAL casts are accepted silently). Read Delta tables on S3 only through `QueryBuilder`; `to_pyarrow_*` reads hung at process exit. Never overwrite bronze objects. Call it a Delta Lake / data lake layer beside the warehouse, not a lakehouse.
+- The Delta layer stores raw objects, normalized prices and published dbt snapshots only; never reimplement dbt metrics. Compare the exact Arrow schema before every Delta write (lossy float→DECIMAL casts are accepted silently). Read Delta tables on S3 only through `QueryBuilder`; `to_pyarrow_*` reads hung at process exit. Never overwrite bronze objects. Fixture/audit demos use the separate `<LAKE_BUCKET>-fixture` bucket and the test PostgreSQL server, never the live bucket or demo database. Call it a Delta Lake / data lake layer beside the warehouse, not a lakehouse.
 - Inspect machine architecture and installed tools; never assume Intel or Apple Silicon.
 - Keep the repository small and understandable. Prefer explicit SQL and ordinary Python functions over extra frameworks.
 - Write docs and comments around concrete design choices, assumptions, trade-offs and observed results. Avoid progress-report filler and repeated scope disclaimers. Comments should explain non-obvious reasons. Preserve verification evidence and disclose assistance accurately; do not invent research, benchmarks or authorship claims.
@@ -18,7 +18,7 @@ Personal portfolio project for Data Engineering / Data Analytics roles, on macOS
 - Never delete volumes or data to fix an error. Diagnose first; any destructive change needs explicit user authorization.
 - Verify idempotency using the exact same captured response twice. Check key counts and values, not only process exit status.
 - Run focused tests and real integration checks when available. Report executed versus unexecuted checks honestly.
-- Maintain README.md, docs/decisions.md and docs/verification.md when behavior or evidence changes. docs/learning-notes.md is a personal, local-only study note; keep it untracked and update it when available.
+- Maintain README.md (short, recruiter-facing: summary, verified results, quick start; keep it under ~200 lines), docs/runbook.md (step-by-step commands), docs/decisions.md and docs/verification.md when behavior or evidence changes. Every number in the README needs evidence in docs/verification.md. docs/learning-notes.md is a personal, local-only study note; keep it untracked and update it when available.
 - Keep migrations additive and preserve stage 1 data. Synthetic tables live in a separate schema; test fixtures stay in tests/fixtures and must never load into live price tables.
 - Use fixed seeds/dates and stable IDs for synthetic data; document price/fee rounding and daily-close assumptions. Verify row values, orphan keys and customer/trade time ordering on rerun.
 - At the end of each stage, explain the flow, main files, three core concepts and three interview questions in Vietnamese.
@@ -38,7 +38,7 @@ Personal portfolio project for Data Engineering / Data Analytics roles, on macOS
 - Dashboard verification: `.venv/bin/python scripts/verify_metabase.py`
 - Airflow: `.venv/bin/python scripts/init_airflow_env.py`; `.venv/bin/python scripts/setup_airflow_role.py`; `docker compose -f compose.yaml -f compose.airflow.yaml up -d --wait airflow_api airflow_scheduler airflow_dag_processor` (build the image first).
 - Airflow manual: `.venv/bin/python scripts/airflow_local.py run --start 2026-10-28 --end 2026-10-29`; backfill uses the same exclusive-end contract.
-- Delta Lake raw layer: `.venv/bin/python scripts/init_lake_env.py`; `docker compose up -d --wait lake_storage`; `.venv/bin/python -m pipeline.lake`; verify with `.venv/bin/python scripts/verify_lake.py`.
+- Delta Lake layer: `.venv/bin/python scripts/init_lake_env.py`; `docker compose up -d --wait lake_storage`; `.venv/bin/python -m pipeline.lake`; `.venv/bin/python -m pipeline.lake_prices`; `.venv/bin/python -m pipeline.lake_publish publish --dataset-id portfolio-v1` (also `list`, `diff`); verify with `.venv/bin/python scripts/verify_lake.py`; fixture audit demo `.venv/bin/python scripts/verify_lake_audit.py`.
 - CI local reproduction: `docker compose -p de_pj_ci -f compose.ci.yaml build ci_runner`; `docker compose -p de_pj_ci -f compose.ci.yaml run ci_runner`. No .env or demo credentials are required.
 - CI entry point: `scripts/verify_ci.py` requires explicit CI_POSTGRES_* settings and reuses fixture models/assertions. Never use a production database for CI.
 - Airflow fault/retry verification: `scripts/verify_airflow.py` requires the separate verification image, test overlay and migrated tmpfs fixture DB. Keep normal DAG paused after review and never overlap CLI/backfill/manual ingestion.

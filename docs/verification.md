@@ -1,4 +1,4 @@
-# Verification — chặng 1, 2A, 2B, 3, 4A, 4B và 5A
+# Verification — chặng 1, 2A, 2B, 3, 4A, 4B và 5A–5C
 
 Trạng thái hiện tại: chặng 1 có commit `4153807`, 2A có `933071b`, 2B có `5993a26`.
 Kết quả chặng 4B ở cuối tài liệu. Các phần trước giữ bằng chứng lịch sử tại thời điểm
@@ -869,3 +869,76 @@ hoặc deployment. Không mở rộng scope ngoài4A/4B.
   của bucket, hoặc backup/restore volume `lake_data`.
 - Nguyên nhân treo của đường pyarrow chưa xác định (delta-rs hay RustFS).
 - Silver prices, published report snapshots và diff (5B–5C) chưa triển khai.
+
+### GitHub-hosted CI cho 5A — 2026-11-09
+
+PR #1 (branch readme-summary: commit 5A `dc1c9c1` + README `1bd70f9`) chạy
+[run 42514070425](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42514070425)
+trên SHA `1bd70f9`: bốn jobs success. Đã tải và đọc JUnit: Python3.12 và 3.13 mỗi bản
+62 tests, 0 failures/errors/skips, trong đó 10 test `test_lake`. User merge PR trên
+GitHub thành merge commit `95abef8` (nội dung giống `1bd70f9`); run
+[42514544383](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42514544383)
+trên main success. CI vẫn chưa chạy với object storage service.
+
+
+## Chặng 5B–5C — silver prices và published report snapshots, 2026-11-09
+
+### Kiểm tra trước khi code
+
+- Quy tắc "attempt thành công mới nhất có cửa sổ bao phủ ngày" so với
+  market.daily_prices: 555 ngày, 555 khớp last_fetch_id, 0 lệch.
+- Scale thực tế: giá 2, volume_base 8; phần nguyên tối đa 5 (giá) và 7 (volume).
+  Mart: trade_volume_usd và fees_usd scale 2.
+- Spike: pyarrow decimal128(38,18) nhận 68123.45, từ chối 1E-19 ("Rescaling Decimal
+  value would cause data loss") và 1E20 vượt precision. `write_deltalake` overwrite với
+  predicate thay đúng dòng dataset `a`, giữ `b`, và từ chối dòng ngoài predicate.
+
+### Kết quả đã chạy
+
+- pytest: 70 passed (thêm 4 test silver: chọn attempt bất kể thứ tự input, body lỗi bị
+  bỏ và báo, upsert chỉ ghi thay đổi + time travel, từ chối scale > 18; 4 test publish:
+  publish lại không tạo gì, correction được reproduce và diff đúng, dataset khác không
+  ảnh hưởng, từ chối nhiều cutoff và dataset_id không an toàn). Một test ban đầu fail
+  vì hai publish cùng published_at có thứ tự không xác định; đã đổi sang sắp theo
+  version của daily_trading.
+- `python -m pipeline.lake_prices` lần 1: attempts_read 41, rejected 0, price_rows 555,
+  rows_written 555, silver_version 0 (1.22 s). Lần 2: rows_written 0, version 0.
+- `python -m pipeline.lake_publish publish --dataset-id portfolio-v1` lần 1: published,
+  as_of_date 2026-10-27, versions 0/0, 116 daily rows, 1,000 customers, 50,000 trades,
+  615063969.51 USD volume, 615063.60 USD fees; git_sha `5d3fe4a…-dirty` (file 5C chưa
+  commit lúc đó). Lần 2: "unchanged since last publication", cùng publication_id.
+- `scripts/verify_lake.py`: bronze như 5A; silver 555 rows equals_postgres=true,
+  rebuild_from_bronze_equal=true (thư mục tạm local); gold 1 publication, logged totals
+  khớp rows, portfolio-v1 "equals current marts"; passed=true.
+- `scripts/verify_lake_audit.py` (test DB `verify_2b_lake_187d61924170`, bucket
+  `investment-lake-fixture`, prefix theo DB; lần chạy đầu `verify_2b_lake_f2d5e7a830fb`
+  cũng pass), 49 s:
+
+| Publication | as_of_date | Delta version | Trades | Volume USD | Fees USD |
+| --- | --- | --- | --- | --- | --- |
+| early | 2026-05-01 | 0 | 2 | 260.00 | 0.26 |
+| baseline | 2026-05-03 | 1 | 6 | 475.94 | 0.48 |
+| threshold | 2026-06-02 | 2 | 6 | 475.94 | 0.48 |
+| inactive | 2026-07-02 | 3 | 6 | 475.94 | 0.48 |
+| corrected | 2026-07-02 | 4 | 6 | 495.94 | 0.50 |
+
+  Publish lại inactive: không tạo publication. Correction trade 3 quantity 10 → 12
+  (notional 100.00 → 120.00, fee 0.10 → 0.12, khớp tính độc lập từ CSV). Diff
+  inactive → corrected: daily_trading đúng 1 dòng 2026-05-02 (volume 155.00 → 175.00,
+  fees 0.16 → 0.18), customer_summary đúng 1 khách `…0002` (155.00 → 175.00,
+  0.16 → 0.18), không added/removed. Cả 5 publication đọc lại qua time travel bằng
+  đúng mart của schema đã publish; log totals khớp rows; demo source tables không đổi.
+
+### Chưa chạy / giới hạn sau 5C
+
+- CI không chạy object storage (5D hoãn); integration chỉ kiểm chứng local.
+- Chưa có lịch chạy, VACUUM/retention policy, AWS S3, concurrent writers hoặc
+  backup bucket. Test DB và prefix fixture được giữ lại, không xóa.
+- Diff chỉ so hai publication cùng dataset; chưa có giao diện xem audit.
+
+### GitHub-hosted CI cho 5B–5C — 2026-11-09
+
+PR #2 (branch stage-5bc, SHA `78a0745`)
+[run 42564259935](https://github.com/sanh0804/investment-data-pipeline/actions/runs/42564259935):
+bốn jobs success. Đã tải và đọc JUnit: Python3.12 và 3.13 mỗi bản 70 tests,
+0 failures/errors/skips. CI vẫn không chạy object storage (5D hoãn).

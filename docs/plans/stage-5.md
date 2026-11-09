@@ -1,6 +1,7 @@
 # Stage 5 plan — Delta Lake audit layer (S3-compatible storage + Delta Lake, no Spark)
 
-Status: 5A implemented and verified locally (docs/verification.md); 5B–5D proposed.
+Status: 5A verified locally and in GitHub-hosted CI; 5B–5C implemented and verified
+locally; 5D deferred.
 Keep scope small: PostgreSQL/dbt remains the warehouse and the place where metrics
 are defined. This is a data lake layer beside it, not a lakehouse.
 
@@ -64,28 +65,44 @@ Not verified: AWS S3, concurrent writers.
 - PostgreSQL raw rows are preserved; this is a copy, not a move.
 - Check: object count equals distinct SHA-256 count; each object's hash matches.
 
-### 5B — Silver: prices rebuilt from bronze
+### 5B — Silver: prices rebuilt from bronze (implemented)
 
-- Read successful bronze objects, normalize with the existing `pipeline.normalize`,
-  and MERGE into Delta `silver/prices` by (source, product_id, price_date), applying
-  the same latest-fetch-wins rule as the PostgreSQL upsert.
-- Explicit schema guard before writes (see spike finding).
-- Check: silver equals `market.daily_prices` row for row; rerun leaves data unchanged.
+- Read successful attempts from the manifest, fetch their objects (hash rechecked),
+  and parse them with the existing `pipeline.normalize` for the request window.
+  A body that fails validation is skipped and counted, as the collector would not
+  have loaded it.
+- Selection rule: for each (source, product_id, price_date), the latest successful
+  attempt whose window covers the day wins (fetched_at, then fetch_id). Checked on
+  2026-11-09 before coding: this reproduces all 555 rows of `market.daily_prices`,
+  including `last_fetch_id`.
+- Silver `prices`: NOT NULL columns, prices and volume as DECIMAL(38,18). Observed
+  scale is 2 for prices and 8 for volume; values beyond scale 18 are rejected, never
+  rounded. Upsert by key, writing only new or changed rows (no empty versions).
+- Checks: silver equals `market.daily_prices` row for row; rerun keeps the version;
+  a rebuild into an empty location equals the current table.
 
-### 5C — Gold: published report snapshots and audit
+### 5C — Gold: published report snapshots and audit (implemented)
 
-- Publishing a report copies `mart_daily_trading` and `mart_customer_summary` into
-  Delta with publish metadata: as_of_date, dataset_id, dbt invocation ID, git SHA,
-  published_at.
-- Demo: publish at an earlier cutoff, then at `2026-10-27`. Time travel returns the
-  earlier version exactly. A diff script lists changed rows and amounts.
-- A price correction is demonstrated only on fixture data in a separate bucket;
-  `portfolio-v1` and live tables are not altered.
+- `publish` copies `mart_daily_trading` and `mart_customer_summary` for one dataset
+  into Delta `gold/` tables (replacing that dataset's rows; one Delta version per
+  publish) and appends to `gold/publications`: publication_id, dataset_id,
+  as_of_date, git SHA, published_at, Delta versions, row counts and totals.
+  Republishing identical content creates nothing.
+- Audit tools: read a publication through time travel; diff two publications by
+  key (added, removed and changed rows with old/new values).
+- Demo on fixture data only, in a separate bucket and test PostgreSQL database:
+  publish the fixture at four cutoffs, then correct one trade in the test database,
+  rebuild, publish, and check that the diff lists exactly the expected rows and
+  amounts. `portfolio-v1` is published once at `2026-10-27` from the live analytics
+  schema, read-only.
+- Time travel depends on Delta log retention: VACUUM below the retention window
+  would remove old files. The publications log records versions and totals so a
+  broken reproduction is detectable.
 
-### 5D — CI
+### 5D — CI against object storage (deferred)
 
-- GitHub Actions runs the fixture through bronze → silver → publish against an
-  ephemeral object-storage service. CI never touches the local volume or demo data.
+Offline unit tests already cover the lake logic in CI. Running RustFS as a CI
+service adds maintenance for little extra evidence at this stage.
 
 ## Acceptance criteria
 
@@ -96,7 +113,7 @@ Not verified: AWS S3, concurrent writers.
 4. A float or wrong-typed batch is rejected before write; table version unchanged.
 5. Time travel reproduces an earlier published report; the diff lists exactly the
    expected changes.
-6. CI runs the fixture path on ephemeral object storage and stays green.
+6. Unit tests for the lake code run in CI; object-storage integration stays local.
 7. README, docs/decisions.md and docs/verification.md record choices, measured
    results and unverified areas.
 
